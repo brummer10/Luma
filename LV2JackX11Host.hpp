@@ -36,6 +36,7 @@
 #include <lv2/worker/worker.h>
 #include <lv2/state/state.h>
 #include <lv2/resize-port/resize-port.h>
+#include <lv2/instance-access/instance-access.h>
 
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
@@ -154,8 +155,14 @@ public:
 ****************************************************************/
 
     void run_ui_loop() {
-        const LV2UI_Idle_Interface* idle = (const LV2UI_Idle_Interface*)
-                            ui_desc->extension_data(LV2_UI__idleInterface);
+        const LV2UI_Idle_Interface* idle = nullptr;
+
+        if (ui_desc && ui_desc->extension_data) {
+            const void* ext =
+                ui_desc->extension_data(LV2_UI__idleInterface);
+
+            idle = static_cast<const LV2UI_Idle_Interface*>(ext);
+        }
 
         Atom WM_DELETE_WINDOW = XInternAtom(x_display, "WM_DELETE_WINDOW", False);
         Atom WM_PROTOCOLS = XInternAtom(x_display, "WM_PROTOCOLS", False);
@@ -212,7 +219,7 @@ public:
                 }
             }
             // run plugin UI idle loop
-            if (idle) {
+            if (idle && idle->idle && ui_handle) {
                 idle->idle(ui_handle);
                 if (!resize_enabled) {
                     idle_counter++;
@@ -228,11 +235,15 @@ public:
 
 ****************************************************************/
 
-    std::vector<std::pair<std::string, std::string>>
-                    find_plugin_matches(const std::string& input) {
+    struct InfoPair {
+        std::string uri;
+        std::string label;
+    };
+
+    std::vector<InfoPair> find_plugin_matches(const std::string& input) {
 
         // uri / name
-        std::vector<std::pair< std::string, std::string >> results;
+        std::vector<InfoPair> results;
         // lowercase input
         std::string needle = input;
         std::transform(needle.begin(), needle.end(), needle.begin(), ::tolower);
@@ -243,25 +254,40 @@ public:
             std::string uri = lilv_node_as_uri(lilv_plugin_get_uri(p));
             const LilvNode* name_node = lilv_plugin_get_name(p);
 
+
             std::string name = name_node ? lilv_node_as_string(name_node) : "";
             std::string lname = name;
-            std::transform(lname.begin(), lname.end(), lname.begin(), ::tolower);
-
-            // --- match rules ---
+            // match rules
             bool match = false;
-            // exact URI
-            if (input == uri) match = true;
-            // exact name
-            if (input == name) match = true;
-            // case-insensitive exact name
-            if (needle == lname) match = true;
-            // substring
-            if (lname.find(needle) != std::string::npos) match = true;
-            // substring
-            if (uri.find(needle) != std::string::npos) match = true;
+            if (!input.empty()) {
 
-            if (match) results.emplace_back(uri, name);
+                std::transform(lname.begin(), lname.end(), lname.begin(), ::tolower);
+
+                // exact URI
+                if (input == uri) match = true;
+                // exact name
+                if (input == name) match = true;
+                // case-insensitive exact name
+                if (needle == lname) match = true;
+                // substring
+                if (lname.find(needle) != std::string::npos) match = true;
+                // substring
+                if (uri.find(needle) != std::string::npos) match = true;
+            } else {
+                match = true;
+            }
+
+            if (match) {
+                InfoPair info;
+                info.uri = uri;
+                info.label = name;
+                results.emplace_back(info);
+            }
         }
+        std::sort(results.begin(), results.end(),
+            [](const InfoPair& a, const InfoPair& b) {
+                return a.label < b.label;
+            });
         return results;
     }
 
@@ -275,9 +301,9 @@ public:
         std::string label;
     };
 
-    std::vector<PresetInfo> get_presets(const char* plugin_uri) {
+    std::vector<InfoPair> get_presets(const char* plugin_uri) {
 
-        std::vector<PresetInfo> result;
+        std::vector<InfoPair> result;
         LilvNode* uri = lilv_new_uri(world, plugin_uri);
 
         const LilvPlugin* plugin =
@@ -309,7 +335,7 @@ public:
             const LilvNode* preset = lilv_nodes_get(presets, i);
             // load preset into world
             lilv_world_load_resource(world, preset);
-            PresetInfo info;
+            InfoPair info;
             info.uri = lilv_node_as_uri(preset);
             LilvNode* label = lilv_world_get(world, preset, label_pred, nullptr);
 
@@ -327,7 +353,7 @@ public:
         lilv_node_free(uri);
 
         std::sort(result.begin(), result.end(),
-            [](const PresetInfo& a, const PresetInfo& b) {
+            [](const InfoPair& a, const InfoPair& b) {
                 return a.label < b.label;
             });
         return result;
@@ -859,29 +885,19 @@ private:
             if (p.is_audio) {
                 p.jack_port = jack_port_register(
                     jack,
-                    sym ? lilv_node_as_string(sym) : "audio",
+                    sym ? p.symbol : "audio",
                     JACK_DEFAULT_AUDIO_TYPE,
                     p.is_input ? JackPortIsInput : JackPortIsOutput,
                     0
                 );
             }
 
-            if (p.is_atom && p.is_input && p.is_midi) {
+            if (p.is_atom && p.is_midi) {
                 p.jack_port = jack_port_register(
                     jack,
-                    sym ? lilv_node_as_string(sym) : "midi",
+                    sym ? p.symbol : "midi",
                     JACK_DEFAULT_MIDI_TYPE,
-                    JackPortIsInput,
-                    0
-                );
-            }
-
-            if (p.is_atom && !p.is_input && p.is_midi) {
-                p.jack_port = jack_port_register(
-                    jack,
-                    sym ? lilv_node_as_string(sym) : "midi",
-                    JACK_DEFAULT_MIDI_TYPE,
-                    JackPortIsOutput,
+                    p.is_input ? JackPortIsInput : JackPortIsOutput,
                     0
                 );
             }
@@ -1190,7 +1206,10 @@ private:
                 gui_uri = strdup (lilv_node_as_uri (lilv_ui_get_uri(ui)));
             }
 
-        if (!ui) return false;
+        if (!ui) {
+            fprintf(stderr, "No supported UI found! Exit here\n");
+            return false;
+        }
 
         char* so = lilv_node_get_path(lilv_ui_get_binary_uri(ui), nullptr);
         char* bundle = lilv_node_get_path(lilv_ui_get_bundle_uri(ui), nullptr);
@@ -1253,8 +1272,13 @@ private:
         LV2_Feature parent { LV2_UI__parent, (void*)x_window };
         LV2_Feature resize_f { LV2_UI__resize, &resize };
 
+        LV2_Handle plugin_instance = lilv_instance_get_handle(instance);
+        LV2_Feature instance_access_feature;
+        instance_access_feature.URI  = LV2_INSTANCE_ACCESS_URI;
+        instance_access_feature.data = plugin_instance;
+
         LV2_Feature* feats[] = { &parent, &resize_f, &pm_f, &ui_options_feature,
-                                &features.um_f, &features.unm_f, nullptr };
+                &features.um_f, &features.unm_f, &instance_access_feature, nullptr };
 
         ui_handle = ui_desc->instantiate( ui_desc, plugin_uri, bundle,
                                           ui_write, this, &ui_widget, feats);
@@ -1264,6 +1288,10 @@ private:
         std::string name = plugin_name;
         if (!preset_label.empty()) name += " - " + preset_label;
         XStoreName(x_display, x_window, name.data()); 
+        XChangeProperty(x_display, x_window,
+            XInternAtom(x_display, "_NET_WM_NAME", False),
+            XInternAtom(x_display, "UTF8_STRING", False),
+            8, PropModeReplace, (unsigned char *) name.data(), strlen(name.data()));
         set_xdnd_proxy(x_display, (Window)ui_widget);
         XSizeHints hints;
         long supplied;

@@ -59,14 +59,46 @@ g++ main.cpp -o luma `pkg-config --cflags --libs jack lilv-0 x11` -ldl
 ```
 
 ---
-
 ## Usage
 
-Start Luma by passing an LV2 plugin URI, a plugin name, or a search string:
+Start **Luma** by passing a plugin URI, plugin name, or a search string:
 
 ```
 ./luma <string>
 ```
+
+If you start Luma **without arguments**, it shows a paged list of all installed LV2 plugins:
+
+```
+./luma
+```
+
+The built-in terminal browser lets you navigate through the list page by page and select a plugin interactively.
+
+Controls:
+
+* **ENTER** → next page
+* **↑/↓** → page navigation
+* **number** → select plugin
+* **q** → quit
+
+After selecting a plugin, Luma displays available presets (if any) and lets you choose one in the same way. Press **ENTER** to start the plugin with its default state.
+
+Examples:
+
+Search by name:
+
+```
+./luma neural
+```
+
+Start directly from URI:
+
+```
+./luma urn:brummer:neuralrack
+```
+
+If multiple plugins match the search string, Luma shows an interactive selection menu.
 
 ### Example: passing a search string
 
