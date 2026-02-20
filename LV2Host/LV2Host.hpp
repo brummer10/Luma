@@ -17,10 +17,9 @@
 
 #pragma once
 
-#include <jack/jack.h>
-#include <jack/midiport.h>
 
 #include "lv2_ringbuffer.h"
+
 #include <lilv/lilv.h>
 
 #include <lv2/ui/ui.h>
@@ -38,9 +37,6 @@
 #include <lv2/resize-port/resize-port.h>
 #include <lv2/instance-access/instance-access.h>
 
-#include <X11/Xlib.h>
-#include <X11/Xatom.h>
-#include <X11/Xutil.h>
 #include <dlfcn.h>
 #include <unistd.h>
 
@@ -55,38 +51,92 @@
 #include <ctime>
 #include <algorithm>
 #include <iostream>
+#include <memory>
+#include <mutex>
+
+#include "IDspEngine.hpp"
+#include "IHostUiBridge.hpp"
+#include "IUiBackend.hpp"
+#include "NoGuiBackend.hpp"
+#include "DummyEngine.hpp"
+
 
 /****************************************************************
-        LV2X11JackHost - class to host LV2 plugins with X11 GUI's
+        LV2Host - class to host LV2 plugins with X11 GUI's
 
 ****************************************************************/
 
-class LV2X11JackHost {
+class LV2HostContext {
 public:
-    explicit LV2X11JackHost() {}
+    static std::shared_ptr<LV2HostContext> acquire() {
+        static std::weak_ptr<LV2HostContext> weak;
+        static std::mutex m;
 
-    ~LV2X11JackHost() {
-        closeHost();
+        std::lock_guard<std::mutex> lock(m);
+
+        auto ctx = weak.lock();
+        if (!ctx) {
+            ctx = std::shared_ptr<LV2HostContext>(new LV2HostContext());
+            weak = ctx;
+        }
+
+        return ctx;
     }
 
-    void init_world() {
-        world = lilv_world_new();
-        lilv_world_load_all(world);
-        plugs = lilv_world_get_all_plugins(world);
+    LilvWorld* world() const { return world_; }
+    const LilvPlugins* plugs() const { return plugs_; }
+
+    ~LV2HostContext() {
+        lilv_world_free(world_);
+    }
+
+private:
+    LV2HostContext() {
+
+        world_ = lilv_world_new();
+        lilv_world_load_all(world_);
+        plugs_ = lilv_world_get_all_plugins(world_);
+    }
+
+    LilvWorld* world_;
+    const LilvPlugins* plugs_;
+};
+
+class LV2Host : public IHostUiBridge {
+public:
+    std::atomic<bool> close_ui{false};
+    explicit LV2Host(std::unique_ptr<IDspEngine> e = nullptr,
+        std::unique_ptr<IUiBackend> b = nullptr) 
+        : ctx(LV2HostContext::acquire())
+        , world(ctx->world())
+        , plugs(ctx->plugs())
+        , engine(std::move(e))
+        , backend(std::move(b)) {
+        if (!engine) engine = std::make_unique<DummyEngine>();
+        if (!backend) backend = std::make_unique<NoGuiBackend>();
+        #if defined(DEBUG)
+        engine = std::make_unique<DummyEngine>();
+        #endif
+    }
+
+    ~LV2Host() {
+        stopUi();
+        closeHost();
     }
 
     bool init(const char* uri) {
         plugin_uri = uri;
-        if (!world) init_world();
+        if (!world) return false;
+        backend->attach_bridge(this);
         return init_lilv()
-            && init_jack()
+            && init_engine()
             && init_ports()
             && init_instance();
     }
 
     bool initUi() {
         return init_ui()
-            && jack_activate(jack) == 0;
+            && engine->activate();
     }
 
     void closeHost() {
@@ -94,45 +144,19 @@ public:
             lilv_instance_deactivate(instance);
         }
         stop_worker();
+        //stopUi();
         destroy_ui();
         if (ui_dl) {
             dlclose(ui_dl);
             ui_dl = nullptr;
         }
 
-        if (jack) {
-            for (auto& p : ports) {
-                if (p.is_audio) {
-                    if (jack_port_connected(p.jack_port)) {
-                        jack_port_disconnect(jack,p.jack_port);
-                    }
-                    jack_port_unregister(jack,p.jack_port);
-                }
-                if (p.is_atom &&  p.is_midi) {
-                    if (jack_port_connected(p.jack_port)) {
-                        jack_port_disconnect(jack,p.jack_port);
-                    }
-                    jack_port_unregister(jack,p.jack_port);
-                }
-            }
-
-            jack_deactivate(jack);
-            jack_client_close(jack);
-            jack = nullptr;
-        }
+        engine->deactivate();
+        engine->close();
 
         if (instance) {
             lilv_instance_free(instance);
             instance = nullptr;
-        }
-
-        if (x_display) {
-            if (x_window) {
-                XDestroyWindow(x_display, x_window);
-            }
-            XCloseDisplay(x_display);
-            x_window = 0;
-            x_display = nullptr;
         }
 
         for (auto& p : ports) {
@@ -144,7 +168,6 @@ public:
 
         if (world) {
             freeNodes();
-            lilv_world_free(world);
             world = nullptr;
         }        
     }
@@ -153,6 +176,23 @@ public:
                         UI LOOP
 
 ****************************************************************/
+
+    void startUi() {
+        ui_is_running.store(true);
+        ui_thread = std::thread(&LV2Host::run_ui_loop, this);
+        #ifndef DEBUG
+        while (!shutdown_requestet.load())
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        #endif
+
+    }
+
+    void stopUi() {
+        if (!ui_is_running.exchange(false)) return;
+        if (ui_thread.joinable() && std::this_thread::get_id() != ui_thread.get_id()) {
+                ui_thread.join();
+            }
+    }
 
     void run_ui_loop() {
         const LV2UI_Idle_Interface* idle = nullptr;
@@ -164,38 +204,23 @@ public:
             idle = static_cast<const LV2UI_Idle_Interface*>(ext);
         }
 
-        Atom WM_DELETE_WINDOW = XInternAtom(x_display, "WM_DELETE_WINDOW", False);
-        Atom WM_PROTOCOLS = XInternAtom(x_display, "WM_PROTOCOLS", False);
-        XSetWMProtocols(x_display, x_window, &WM_DELETE_WINDOW, 1);
-        run.store(true, std::memory_order_release);
+        run.store(true, std::memory_order_release); 
         int idle_counter = 0;
         bool resize_enabled = false;
 
         while (run.load()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(16)); // ~60 FPS
-            while (XPending(x_display)) {
-                XEvent ev;
-                XNextEvent(x_display, &ev);
-                if (ev.type == ClientMessage) {
-                    if ((Atom)ev.xclient.message_type == WM_PROTOCOLS &&
-                        (Atom)ev.xclient.data.l[0] == WM_DELETE_WINDOW) {
-                        fprintf(stderr, "Exit\n");
-                        shutdown.store(true, std::memory_order_release);
-                        run.store(false, std::memory_order_release);
-                        closeHost();
-                        return;
-                    }
-                }
-                if (ev.type == ConfigureNotify) {
-                    XConfigureEvent xev = ev.xconfigure;
-                    if (xev.width != wx || xev.height != wy) {
-                        wx = xev.width;
-                        wy = xev.height;
-                        if (resize_enabled)XResizeWindow(
-                            x_display, (Window)ui_widget, xev.width, xev.height);
-                    }
-                }
+
+            if (shutdown_requestet.load()) {
+                fprintf(stderr, "Exit\n");
+                shutdown.store(true, std::memory_order_release);
+                run.store(false, std::memory_order_release);
+                close_ui.store(true, std::memory_order_release);
+                closeHost();
+                return;
             }
+            // run the host window
+            backend->poll_events();
 
             if (ui_dirty.exchange(false)) send_control_outputs();
             if (ui_needs_initial_update.exchange(false))
@@ -229,6 +254,10 @@ public:
         }
     }
 
+    void request_shutdown() {
+        shutdown_requestet.store(true, std::memory_order_release);
+    }
+
 /****************************************************************
             FIND - list available plugin
                    return a vector with plugin uri and name
@@ -253,16 +282,13 @@ public:
             const LilvPlugin* p = lilv_plugins_get(plugs, i);
             std::string uri = lilv_node_as_uri(lilv_plugin_get_uri(p));
             const LilvNode* name_node = lilv_plugin_get_name(p);
-
-
             std::string name = name_node ? lilv_node_as_string(name_node) : "";
             std::string lname = name;
+
             // match rules
             bool match = false;
             if (!input.empty()) {
-
                 std::transform(lname.begin(), lname.end(), lname.begin(), ::tolower);
-
                 // exact URI
                 if (input == uri) match = true;
                 // exact name
@@ -296,20 +322,13 @@ public:
                      return a list with preset uri and name
 ****************************************************************/
 
-    struct PresetInfo {
-        std::string uri;
-        std::string label;
-    };
-
     std::vector<InfoPair> get_presets(const char* plugin_uri) {
 
         std::vector<InfoPair> result;
         LilvNode* uri = lilv_new_uri(world, plugin_uri);
 
-        const LilvPlugin* plugin =
-            lilv_plugins_get_by_uri(
-                lilv_world_get_all_plugins(world),
-                uri);
+        const LilvPlugin* plugin = lilv_plugins_get_by_uri(
+                        lilv_world_get_all_plugins(world), uri);
 
         if (!plugin) {
             std::cerr << "Plugin not found\n";
@@ -369,7 +388,7 @@ public:
 
         (void) size;
         (void) type;
-        auto* self = static_cast<LV2X11JackHost*>(user_data);
+        auto* self = static_cast<LV2Host*>(user_data);
         for (auto& p : self->ports) {
             if (!p.is_control) continue;
             if (strcmp(p.symbol, port_symbol) == 0) {
@@ -445,6 +464,69 @@ public:
 
         ui_needs_control_update.store(true);
         ui_needs_initial_update.store(false);
+    }
+
+/****************************************************************
+        IHostUiBridge - Interface from host to UI
+
+****************************************************************/
+
+    void list_controls() const override {
+        for (auto& p : ports) {
+            if (p.is_control) {
+                printf("[%d] %s = %f\n",
+                    p.index,
+                    p.symbol ? p.symbol : "?",
+                    p.control);
+            }
+        }
+    }
+
+    uint32_t control_port_count() const override {
+        return ports.size();
+    }
+
+    void set_control(uint32_t index, float value) override {
+        for (auto& p : ports) {
+            if (p.index == (size_t)index && p.is_control) {
+                p.control = value;
+                ui_dirty.store(true);
+                return;
+            }
+        }
+    }
+
+    float get_control(uint32_t index) const override {
+        for (auto& p : ports) {
+            if (p.index == (size_t)index && p.is_control)
+                return p.control;
+        }
+
+        return 0.0f;
+    }
+
+    void send_atom_to_plugin(uint32_t port, uint32_t size,
+                            uint32_t type,const void* data) override {
+
+        auto& p = ports[port];
+        if (!p.is_atom || !p.atom_state) return;
+        p.atom_state->ui_to_dsp.resize(size);
+        memcpy(p.atom_state->ui_to_dsp.data(), data, size);
+        p.atom_state->ui_to_dsp_type = type;
+        p.atom_state->ui_to_dsp_pending.store(true,
+            std::memory_order_release);
+    }
+
+    const char* port_name(uint32_t port) const override {
+        return ports[port].symbol;
+    }
+
+    bool port_is_input(uint32_t port) const override {
+        return ports[port].is_input;
+    }
+
+    bool port_is_control(uint32_t port) const override {
+        return ports[port].is_control;
     }
 
 private:
@@ -613,7 +695,7 @@ private:
 
         float control = 0.0f;
         float defvalue = 0.0f;
-        jack_port_t* jack_port = nullptr;
+        std::unique_ptr<IDspPort> engine_port;
 
         LV2_Atom_Sequence* atom = nullptr;
         uint32_t atom_buf_size = 8192;
@@ -635,13 +717,16 @@ private:
         LV2_URID atom_Float;
         LV2_URID atom_Int;
         LV2_URID atom_Double;
+        LV2_URID atom_Bool;
         LV2_URID midi_Event;
         LV2_URID buf_maxBlock;
         LV2_URID atom_Path;
+        LV2_URID atom_String;
         LV2_URID patch_Get;
         LV2_URID patch_Set;
         LV2_URID patch_property;
         LV2_URID patch_value;
+        LV2_URID atom_URID;
         LV2_URID atom_Blank;
         LV2_URID atom_Chunk;
         LV2_URID param_sampleRate;
@@ -656,19 +741,22 @@ private:
         urids.atom_Float       = map_uri(this, LV2_ATOM__Float);
         urids.atom_Int         = map_uri(this, LV2_ATOM__Int);
         urids.atom_Double      = map_uri(this, LV2_ATOM__Double);
+        urids.atom_Bool        = map_uri(this, LV2_ATOM__Bool);
         urids.midi_Event       = map_uri(this, LV2_MIDI__MidiEvent);
         urids.buf_maxBlock     = map_uri(this, LV2_BUF_SIZE__maxBlockLength);
         urids.atom_Path        = map_uri(this, LV2_ATOM__Path);
+        urids.atom_String      = map_uri(this, LV2_ATOM__String);
 
         urids.patch_Get        = map_uri(this, LV2_PATCH__Get);
         urids.patch_Set        = map_uri(this, LV2_PATCH__Set);
         urids.patch_property   = map_uri(this, LV2_PATCH__property);
         urids.patch_value      = map_uri(this, LV2_PATCH__value);
+        urids.atom_URID        = map_uri(this, LV2_ATOM__URID);
         urids.param_sampleRate = map_uri(this, LV2_PARAMETERS__sampleRate);
     }
 
     static LV2_URID map_uri(LV2_URID_Map_Handle h, const char* uri) {
-        auto* self = static_cast<LV2X11JackHost*>(h);
+        auto* self = static_cast<LV2Host*>(h);
         auto it = self->urid_map.find(uri);
         if (it != self->urid_map.end())
             return it->second;
@@ -680,7 +768,7 @@ private:
     }
 
     static const char* unmap_uri(LV2_URID_Unmap_Handle h, LV2_URID urid) {
-        auto* self = static_cast<LV2X11JackHost*>(h);
+        auto* self = static_cast<LV2Host*>(h);
 
         auto it = self->urid_unmap.find(urid);
         if (it == self->urid_unmap.end())
@@ -807,7 +895,6 @@ private:
         const LilvNode* nd = nullptr;
         nd = lilv_plugin_get_name(plugin);
         plugin_name = lilv_node_as_string(nd);
-        //lilv_node_free(nd);
 
         audio_class     = lilv_new_uri(world, LV2_CORE__AudioPort);
         control_class   = lilv_new_uri(world, LV2_CORE__ControlPort);
@@ -821,7 +908,7 @@ private:
         if (!check_resize_port_requirements(plugin)) {
             fprintf(stderr,"%s requires resize-port support – not supported\n", plugin_name.data());
             return false;
-            }
+        }
 
         return true;
     }
@@ -837,20 +924,20 @@ private:
     }
 
 /****************************************************************
-        JACK - check if jack is running and open client
+        IDspEngine - setup audio/midi back-end
 
 ****************************************************************/
 
-    static int jack_process(jack_nframes_t n, void* arg) {
-        return static_cast<LV2X11JackHost*>(arg)->process(n);
+    static void process_wrapper(uint32_t nframes,void* userdata) {
+        auto* self = static_cast<LV2Host*>(userdata);
+        self->process(nframes);
     }
 
-    bool init_jack() {
-        jack = jack_client_open(plugin_name.data(), JackNullOption, nullptr);
-        if (!jack) return false;
+    bool init_engine() {
+        if (!engine->open(plugin_name)) return false;
 
-        jack_set_process_callback(jack, jack_process, this);
-        max_block_length = jack_get_buffer_size(jack);
+        max_block_length = engine->buffer_size();
+        engine->set_process_callback(&LV2Host::process_wrapper,this);
         return true;
     }
 
@@ -883,23 +970,13 @@ private:
                 }
 
             if (p.is_audio) {
-                p.jack_port = jack_port_register(
-                    jack,
-                    sym ? p.symbol : "audio",
-                    JACK_DEFAULT_AUDIO_TYPE,
-                    p.is_input ? JackPortIsInput : JackPortIsOutput,
-                    0
-                );
+                p.engine_port = engine->create_audio_port(sym ? 
+                    p.symbol : "audio",p.is_input ? true : false);
             }
 
             if (p.is_atom && p.is_midi) {
-                p.jack_port = jack_port_register(
-                    jack,
-                    sym ? p.symbol : "midi",
-                    JACK_DEFAULT_MIDI_TYPE,
-                    p.is_input ? JackPortIsInput : JackPortIsOutput,
-                    0
-                );
+                p.engine_port = engine->create_midi_port(sym ? 
+                    p.symbol : "midi",p.is_input ? true : false);
             }
 
             if (p.is_atom) {
@@ -931,7 +1008,7 @@ private:
                 }
             }
 
-            ports.push_back(p);
+            ports.emplace_back(std::move(p));
         }
         lilv_node_free(midi_event);
         return true;
@@ -945,14 +1022,8 @@ private:
     bool init_instance() {
 
         LV2_Options_Option options[] = {
-            {
-                LV2_OPTIONS_INSTANCE,
-                0,
-                urids.buf_maxBlock,
-                sizeof(uint32_t),
-                urids.atom_Int,
-                &max_block_length
-            },
+            {LV2_OPTIONS_INSTANCE, 0, urids.buf_maxBlock,
+                sizeof(uint32_t), urids.atom_Int, &max_block_length},
             { LV2_OPTIONS_INSTANCE, 0, 0, 0, 0, nullptr }
         };
 
@@ -962,17 +1033,12 @@ private:
                             &features.bbl_feature, &host_worker.feature, nullptr };
 
         if (!checkFeatures(plugin, feats)) return false;
-
         // instantiate the plugin dsp instance 
-        instance = lilv_plugin_instantiate(plugin,
-                    jack_get_sample_rate(jack), feats);
-
+        instance = lilv_plugin_instantiate(plugin, engine->sample_rate(), feats);
         if (!instance) return false;
-
         // check if plugin require a worker thread 
         const LV2_Worker_Interface* iface = (const LV2_Worker_Interface*)
             lilv_instance_get_extension_data( instance, LV2_WORKER__interface);
-
         // start worker when plugin wants it
         if (iface) {
             host_worker.iface = iface;
@@ -983,7 +1049,6 @@ private:
             host_worker.worker_thread =
                 std::thread(worker_thread_func, &host_worker);
         }
-
         // connect control and atom ports
         for (auto& p : ports) {
             if (p.is_audio) continue;
@@ -1002,12 +1067,17 @@ private:
 
 ****************************************************************/
 
-    int process(jack_nframes_t nframes) {
+#if defined (DEBUG)
+#include "LV2HostDebug.hpp"
+#endif
+
+    int process(uint32_t nframes) {
         if (shutdown.load()) return 0;
         for (Port& p : ports) {
             // connect all audio ports
             if (p.is_audio) {
-                void* buf = jack_port_get_buffer(p.jack_port, nframes);
+                auto* ap = dynamic_cast<IAudioPort*>(p.engine_port.get());
+                void* buf = ap->audio_buffer(nframes);
                 lilv_instance_connect_port(instance, p.index, buf);
             }
             // prepare atom output buffers for plugin write  
@@ -1019,21 +1089,25 @@ private:
             if (p.is_atom && p.is_input) {
                 // handle midi input
                 if (p.is_midi) {
-                    void* midi_buf = jack_port_get_buffer(p.jack_port, nframes);
-                    uint32_t event_count = jack_midi_get_event_count(midi_buf);
+                    IMidiPort* mp = dynamic_cast<IMidiPort*>(p.engine_port.get());
+                    IMidiBuffer* mb = mp->midi_buffer(nframes);
+                    uint32_t event_count = mb->event_count();
                     lv2_atom_sequence_clear(p.atom);
                     p.atom->atom.type = urids.atom_Sequence;
                     p.atom->atom.size = sizeof(LV2_Atom_Sequence_Body);
                     for (uint32_t i = 0; i < event_count; ++i) {
-                        jack_midi_event_t ev;
-                        jack_midi_event_get(&ev, midi_buf, i);
+                        MidiEvent ev;
+                        mb->get_event(i, ev);
                         uint8_t evbuf[sizeof(LV2_Atom_Event) + required_atom_size];
                         LV2_Atom_Event* aev = (LV2_Atom_Event*)evbuf;
-                        aev->time.frames = ev.time;
+                        aev->time.frames = ev.frame;
                         aev->body.type  = urids.midi_Event;
                         aev->body.size  = ev.size;
-                        memcpy(LV2_ATOM_BODY(&aev->body), ev.buffer, ev.size);
+                        memcpy(LV2_ATOM_BODY(&aev->body), ev.data, ev.size);
                         lv2_atom_sequence_append_event(p.atom, p.atom_buf_size, aev);
+                        #if defined(DEBUG)
+                        dump_atom_event(aev, "midi input");
+                        #endif
                     }
                 }
                 // handle atom messages from GUI to dsp
@@ -1049,6 +1123,9 @@ private:
                     memcpy((uint8_t*)LV2_ATOM_BODY(&ev->body),
                         p.atom_state->ui_to_dsp.data(), body_size);
                     lv2_atom_sequence_append_event( p.atom, p.atom_buf_size, ev);
+                    #if defined(DEBUG)
+                    dump_atom_event(ev, "UI => DSP");
+                    #endif
                 }
             }
         }
@@ -1062,28 +1139,30 @@ private:
             if (p.is_control && !p.is_input) ui_dirty.store(true);
             // reset atom input port buffer after dsp have read it
             if (p.is_atom && p.is_input) p.atom->atom.size = 0;
-            // init a midi output buffer when needed
-            void* midi_buf = nullptr;
-            if (p.is_atom && !p.is_input && p.is_midi) {
-                midi_buf = jack_port_get_buffer(p.jack_port, nframes);
-                jack_midi_clear_buffer(midi_buf);
-            }
             // handle atom messages from dsp to UI (using a ringbuffer)
             if (p.is_atom && !p.is_input) {
                 LV2_Atom_Sequence* seq = p.atom;
                 LV2_ATOM_SEQUENCE_FOREACH(seq, ev) {
                     if (ev->body.size == 0)break;
                     if (p.atom->atom.type == 0) break;
+                    #if defined(DEBUG)
+                    dump_atom_event(ev, "DSP => UI");
+                    #endif
                     const uint32_t total = sizeof(LV2_Atom) + ev->body.size;
                     if (lv2_ringbuffer_write_space(p.atom_state->dsp_to_ui) >= total) {
                         lv2_ringbuffer_write(p.atom_state->dsp_to_ui, (const char*)&ev->body, total);
                     }
-                    // forward midi output to jack
-                    if (ev->body.type == urids.midi_Event) {
+                    // forward midi output to IMidiPort
+                    if (ev->body.type == urids.midi_Event && p.is_midi) {
                         const uint8_t* midi = (const uint8_t*)LV2_ATOM_BODY(&ev->body);
                         const uint32_t size = ev->body.size;
                         const uint32_t frame = ev->time.frames;
-                        jack_midi_event_write(midi_buf, frame, midi, size);
+
+                        IMidiPort* mp = dynamic_cast<IMidiPort*>(p.engine_port.get());
+                        IMidiBuffer* mb = mp->midi_buffer(nframes);
+                        mb->clear();
+                        mb->write_event(frame, midi, size);
+                        
                     }
                 }
                 p.atom->atom.type = 0;
@@ -1098,31 +1177,10 @@ private:
 
 ****************************************************************/
 
-    static void set_xdnd_proxy(Display* dpy, Window plugin_window) {
-        if (!dpy || !plugin_window) return;
-        Atom xdnd_proxy = XInternAtom(dpy, "XdndProxy", False);
-        if (xdnd_proxy == None) return;
-        Window root, parent;
-        Window* children = nullptr;
-        unsigned int nchildren = 0;
-        Window w = plugin_window;
-
-        while (w != None) {
-            XChangeProperty(dpy, w, xdnd_proxy, XA_WINDOW, 32, PropModeReplace,
-                            (unsigned char*)&plugin_window, 1);
-
-            if (!XQueryTree(dpy, w, &root, &parent, &children, &nchildren)) break;
-            if (children) XFree(children);
-            if (parent == root || parent == None) break;
-            w = parent;
-        }
-        XFlush(dpy);
-    }
-
     static void ui_write(LV2UI_Controller c, uint32_t port,
                 uint32_t size, uint32_t type, const void* buf) {
 
-        auto* self = static_cast<LV2X11JackHost*>(c);
+        auto* self = static_cast<LV2Host*>(c);
         auto& p = self->ports[port];
 
         if (p.is_control && size == sizeof(float)) {
@@ -1139,25 +1197,27 @@ private:
     }
 
     static uint32_t ui_port_map(LV2UI_Feature_Handle h, const char* uri) {
-        auto* self = static_cast<LV2X11JackHost*>(h);
+        auto* self = static_cast<LV2Host*>(h);
         for (auto& p : self->ports)
             if (p.uri == uri) return p.index;
         return LV2UI_INVALID_PORT_INDEX;
     }
 
     static int ui_resize(LV2UI_Feature_Handle h, int w, int hgt) {
-        auto* self = static_cast<LV2X11JackHost*>(h);
-        if (!self->x_window || !self->x_display) return 1;
-        self->wx = w;
-        self->wy = hgt;
-        XLockDisplay(self->x_display);
-        XResizeWindow(self->x_display, self->x_window, w, hgt);
-        XFlush(self->x_display);
-        XUnlockDisplay(self->x_display);
+        auto* self = static_cast<LV2Host*>(h);
+        self->backend->resize(w, hgt);
         return 0;
     }
 
+    void load_defaults() {
+        for (auto& p : ports)
+            if (p.is_control && p.is_input) {
+                p.control = p.defvalue;
+            }
+    }
+
     void send_initial_ui_values() {
+        if (!ui_handle) return;
         for (auto& p : ports)
             if (p.is_control && p.is_input) {
                 p.control = p.defvalue;
@@ -1167,6 +1227,7 @@ private:
     }
 
     void send_control_values() {
+        if (!ui_handle) return;
         for (auto& p : ports)
             if (p.is_control && p.is_input) {
                 ui_desc->port_event(
@@ -1175,6 +1236,7 @@ private:
     }
 
     void send_control_outputs() {
+        if (!ui_handle) return;
         for (auto& p : ports)
             if (p.is_control && !p.is_input) {
                 ui_desc->port_event(
@@ -1183,11 +1245,18 @@ private:
     }
 
     void destroy_ui() {
+        if (!ui_handle) return;
         if (ui_desc && ui_handle) {
             ui_desc->cleanup(ui_handle);
             ui_handle = nullptr;
         }
     }
+
+    static unsigned int host_ui_supported(const char* ui_type, const char* host_type) {
+        if (!ui_type || !host_type) return 0;
+        return strcmp(ui_type, host_type) == 0;
+    }
+
 
 /****************************************************************
             UI -init the UI (Host and Plugin)
@@ -1195,120 +1264,137 @@ private:
 ****************************************************************/
 
     bool init_ui() {
+        if (!backend->lv2_ui_uri()) {
+            backend->set_close_callback([this]() {request_shutdown();});
+            backend = std::make_unique<NoGuiBackend>();
+            backend->attach_bridge(this);
+            if (!ui_needs_control_update.load()) load_defaults();
+            fprintf(stderr, "Running headless (NoGuiBackend)\n Press ctrl+c to quit\n");
+            return true;
+        }
+        // Find supported LV2 UI
         const LilvUIs* uis = lilv_plugin_get_uis(plugin);
         const LilvUI* ui = nullptr;
-
+        const LilvNode* ui_type = nullptr;
         char* gui_uri = nullptr;
-        // only X11 UI's been supported
-        LILV_FOREACH(uis, i, uis)
-            if (lilv_ui_is_a(lilv_uis_get(uis, i), x11_class)) {
-                ui = lilv_uis_get(uis, i);
-                gui_uri = strdup (lilv_node_as_uri (lilv_ui_get_uri(ui)));
-            }
 
-        if (!ui) {
-            fprintf(stderr, "No supported UI found! Exit here\n");
-            return false;
+        // get supported ui type from backend
+        LilvNode* backend_uri = lilv_new_uri(world, backend->lv2_ui_uri());
+        // check if backend support plugin ui
+        LILV_FOREACH(uis, i, uis) {
+            const LilvUI* cand = lilv_uis_get(uis, i);
+            if (lilv_ui_is_supported(cand, host_ui_supported, backend_uri, &ui_type)) {
+                ui = cand;
+                gui_uri = strdup (lilv_node_as_uri (lilv_ui_get_uri(ui)));
+                break;
+            }
         }
 
+        lilv_node_free(backend_uri);
+
+        if (!ui) {
+            backend = std::make_unique<NoGuiBackend>();
+            backend->attach_bridge(this);
+            if (!ui_needs_control_update.load()) load_defaults();
+            return true;
+        }
+
+        // Load UI binary
         char* so = lilv_node_get_path(lilv_ui_get_binary_uri(ui), nullptr);
         char* bundle = lilv_node_get_path(lilv_ui_get_bundle_uri(ui), nullptr);
-
         ui_dl = dlopen(so, RTLD_NOW);
         free(so);
 
-        auto fn = (const LV2UI_Descriptor* (*)(uint32_t))
-            dlsym(ui_dl, "lv2ui_descriptor");
+        if (!ui_dl) {
+            fprintf(stderr, "dlopen failed\n");
+            free(bundle);
+            free(gui_uri);
+            return false;
+        }
 
+        auto fn = (const LV2UI_Descriptor* (*)(uint32_t)) dlsym(ui_dl, "lv2ui_descriptor");
         const LV2UI_Descriptor* plugin_gui = nullptr;
         uint32_t index = 0;
+
         while (fn) {
             plugin_gui = fn(index);
-            if (!plugin_gui) { break; }
-            if (!strcmp (plugin_gui->URI, gui_uri)) { break; }
+            if (!plugin_gui) break;
+            if (!strcmp(plugin_gui->URI, gui_uri)) break;
             ++index;
         }
         free(gui_uri);
-        if (!plugin_gui) return false;
 
-        ui_desc = fn(index);
+        if (!plugin_gui) {
+            free(bundle);
+            return false;
+        }
+        ui_desc = plugin_gui;
+        // Create backend window
+        if (!backend->create_window(640, 480)) {
+            free(bundle);
+            return false;
+        }
 
-        long event_mask = StructureNotifyMask;
-        x_display = XOpenDisplay(nullptr);
-        x_window = XCreateSimpleWindow(
-            x_display, DefaultRootWindow(x_display),
-            100, 100, 640, 480, 0, 0, 0);
-
-        XSelectInput(x_display, x_window, event_mask);
-        XMapWindow(x_display, x_window);
-        Atom dnd_version = 5;
-        Atom XdndAware = XInternAtom (x_display, "XdndAware", False);
-        XChangeProperty (x_display, x_window, XdndAware, XA_ATOM,
-                        32, PropModeReplace, (unsigned char*)&dnd_version, 1);
-        XFlush(x_display);
-
-        float ui_sample_rate = (float)jack_get_sample_rate(jack);
+        // LV2 instantiate
+        float ui_sample_rate = (float)engine->sample_rate();
 
         LV2_Options_Option ui_options[] = {
-            {
-                LV2_OPTIONS_INSTANCE,
-                0,
-                urids.param_sampleRate,
-                sizeof(float),
-                urids.atom_Float,
-                &ui_sample_rate
-            },
+            {LV2_OPTIONS_INSTANCE, 0, urids.param_sampleRate,
+                sizeof(float), urids.atom_Float, &ui_sample_rate},
             { LV2_OPTIONS_INSTANCE, 0, 0, 0, 0, nullptr }
         };
 
-        LV2_Feature ui_options_feature = {LV2_OPTIONS__options, ui_options};
+        LV2_Feature ui_options_feature = {LV2_OPTIONS__options, ui_options };
 
-        resize.handle    = this;
+        resize.handle = this;
         resize.ui_resize = ui_resize;
 
         LV2UI_Port_Map pm { this, ui_port_map };
 
         LV2_Feature pm_f { LV2_UI__portMap, &pm };
-        LV2_Feature parent { LV2_UI__parent, (void*)x_window };
+        LV2_Feature parent {
+            LV2_UI__parent,
+            (void*)backend->native_window()
+        };
         LV2_Feature resize_f { LV2_UI__resize, &resize };
 
-        LV2_Handle plugin_instance = lilv_instance_get_handle(instance);
+        LV2_Handle plugin_instance =
+            lilv_instance_get_handle(instance);
+
         LV2_Feature instance_access_feature;
         instance_access_feature.URI  = LV2_INSTANCE_ACCESS_URI;
         instance_access_feature.data = plugin_instance;
 
-        LV2_Feature* feats[] = { &parent, &resize_f, &pm_f, &ui_options_feature,
-                &features.um_f, &features.unm_f, &instance_access_feature, nullptr };
+        LV2_Feature* feats[] = {&parent, &resize_f, &pm_f, &ui_options_feature,
+            &features.um_f, &features.unm_f, &instance_access_feature, nullptr};
 
-        ui_handle = ui_desc->instantiate( ui_desc, plugin_uri, bundle,
-                                          ui_write, this, &ui_widget, feats);
+        ui_handle = ui_desc->instantiate(ui_desc, plugin_uri, bundle, ui_write,
+                                                        this, &ui_widget, feats);
 
         free(bundle);
-        //fprintf(stderr, "name %s\n", plugin_name.data());
+        if (!ui_handle) return false;
+
+        // Embed UI + finalize window
+        backend->embed_native(ui_widget);
         std::string name = plugin_name;
         if (!preset_label.empty()) name += " - " + preset_label;
-        XStoreName(x_display, x_window, name.data()); 
-        XChangeProperty(x_display, x_window,
-            XInternAtom(x_display, "_NET_WM_NAME", False),
-            XInternAtom(x_display, "UTF8_STRING", False),
-            8, PropModeReplace, (unsigned char *) name.data(), strlen(name.data()));
-        set_xdnd_proxy(x_display, (Window)ui_widget);
-        XSizeHints hints;
-        long supplied;
-
-        if (XGetWMNormalHints(x_display, (Window)ui_widget, &hints, &supplied)) {
-            XSetWMNormalHints(x_display, x_window, &hints);
+        backend->finalize_window(name.c_str());
+        backend->set_close_callback([this]() {request_shutdown();});
+        if (!ui_needs_control_update.load()) {
+            load_defaults();
+            ui_needs_initial_update.store(true);
         }
 
-        if (!ui_needs_control_update.load()) ui_needs_initial_update.store(true);
-        return ui_handle;
+        return true;
     }
+
 
 /****************************************************************
         HOST DATA - private host data members
 
 ****************************************************************/
 
+    std::shared_ptr<LV2HostContext> ctx;
     const char* plugin_uri;
     std::string preset_uri;
     std::string preset_label;
@@ -1322,7 +1408,9 @@ private:
     LilvNode *audio_class, *control_class, *atom_class,
              *input_class, *x11_class,*rsz_minimumSize;
 
-    jack_client_t* jack = nullptr;
+    std::unique_ptr<IDspEngine> engine;
+    std::unique_ptr<IUiBackend> backend;
+
     std::vector<Port> ports;
 
     LV2UI_Resize resize;
@@ -1331,19 +1419,22 @@ private:
     LV2UI_Handle ui_handle = nullptr;
     LV2UI_Widget ui_widget = nullptr;
 
-    Display* x_display = nullptr;
-    Window x_window = 0;
+    //Display* x_display = nullptr;
+    //Window x_window = 0;
     int wx = 640;
     int wy = 480;
 
     uint32_t max_block_length = 4096;
     uint32_t required_atom_size = 8192;
 
+    std::thread ui_thread;
+    std::atomic<bool> ui_is_running{false};
     std::atomic<bool> lilv_is_inited{false};
     std::atomic<bool> ui_dirty{false};
     std::atomic<bool> ui_needs_initial_update{false};
     std::atomic<bool> ui_needs_control_update{false};
     std::atomic<bool> run{false};
     std::atomic<bool> shutdown{false};
+    std::atomic<bool> shutdown_requestet{false};
 };
 

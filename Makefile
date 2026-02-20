@@ -2,6 +2,7 @@
 CXX      := g++
 TARGET   := luma
 SRC      := main.cpp
+INCL     := -I. -I./BackEnds -I./Engines -I./LV2Host
 OBJ      := $(SRC:.cpp=.o)
 DEP      := $(OBJ:.o=.d)
 
@@ -17,11 +18,11 @@ $(TARGET): $(OBJ)
 	$(CXX) $^ -o $@ $(PKG_LIBS)
 
 %.o: %.cpp
-	$(CXX) $(CXXFLAGS) $(PKG_CFLAGS) -MMD -MP -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(INCL) $(PKG_CFLAGS) -MMD -MP -c $< -o $@
 
 -include $(DEP)
 
-debug: CXXFLAGS := -std=c++17 -Wall -Wextra -g -O0
+debug: CXXFLAGS := -std=c++17 -Wall -Wextra -g -O0 -DDEBUG
 debug: clean all
 
 clean:

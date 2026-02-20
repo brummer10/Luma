@@ -12,6 +12,11 @@
 
 ****************************************************************/
 
+#include "LV2Host.hpp"
+#include "JackEngine.hpp"
+#include "X11UiBackend.cpp"
+//#include "GTK2UiBackend.cpp"
+
 #include <iostream>
 #include <iomanip>
 #include <vector>
@@ -23,8 +28,38 @@
 #include <termios.h>
 #include <unistd.h>
 #include <cstdlib>
+#include <atomic>
+#include <csignal>
 
-#include "LV2JackX11Host.hpp"
+LV2Host host(std::make_unique<JackEngine>(),
+             std::make_unique<X11UiBackend>());
+
+
+void signal_handler(int sig) {
+    switch (sig) {
+        case SIGINT:
+        case SIGHUP:
+        case SIGTERM:
+        case SIGQUIT:
+        {
+            const char* msg = "\nSignal received, exiting...\n";
+            write(STDERR_FILENO, msg, strlen(msg));
+            host.request_shutdown();
+        }
+        break;
+        default:
+        break;
+    }
+}
+
+struct AltScreenGuard {
+    AltScreenGuard() {
+        std::cout << "\033[?1049h" << "\033[H" << std::flush;
+    }
+    ~AltScreenGuard() {
+        std::cout << "\033[?1049l" << std::flush;
+    }
+};
 
 enum InputKey {
     KEY_NONE,
@@ -108,6 +143,7 @@ static void clear_previous_output() {
     std::cout << "\033[" << last_drawn_lines << "A";
     // clear to end of screen
     std::cout << "\033[J";
+    last_drawn_lines = 0;
 }
 
 static void blue() {
@@ -123,7 +159,7 @@ static void clear_color() {
 }
 
 // returns selected index, or -1 if none selected
-int pager_print(const std::vector<LV2X11JackHost::InfoPair>& matches, bool allow_default) {
+int pager_print(const std::vector<LV2Host::InfoPair>& matches, bool allow_default) {
 
     if (matches.empty()) return -1;
 
@@ -233,6 +269,7 @@ int print_centered(const std::vector<std::string>& lines, int term_width) {
 }
 
 int main(int argc, char *argv[]) {
+    AltScreenGuard screen;
 
     if (0 == XInitThreads())
         std::cerr << "Warning: XInitThreads() failed\n";
@@ -241,18 +278,22 @@ int main(int argc, char *argv[]) {
     std::string preset_uri;
     std::string preset_label;
 
-    LV2X11JackHost host;
-    host.init_world();
-    auto matches = host.find_plugin_matches(uri);
+    signal (SIGQUIT, signal_handler);
+    signal (SIGTERM, signal_handler);
+    signal (SIGHUP, signal_handler);
+    signal (SIGINT, signal_handler);
 
+    auto matches = host.find_plugin_matches(uri);
     if (matches.empty()) {
         red();
         std::cerr << "No plugin found\n"; 
         clear_color();
         host.closeHost();
+        std::cout << "\033[?1049l";
         return 1;
     }
-    std::string fm =  "Fond " + std::to_string(matches.size()) + " Plugins:";
+
+    std::string fm =  "Found " + std::to_string(matches.size()) + " Plugins:";
     std::vector<std::string> logo = {
         " ╦  ╦ ╦ ╔╦╗ ╔═╗ ",
         " ║  ║ ║ ║║║ ╠═╣ ",
@@ -278,6 +319,7 @@ int main(int argc, char *argv[]) {
         uri = matches[pchoice].uri;
     } else {
         host.closeHost();
+        std::cout << "\033[?1049l";
         return 0;
     }
 
@@ -303,15 +345,19 @@ int main(int argc, char *argv[]) {
             std::cout << std::string(pad, ' ') << prset << "\n";
             clear_color();
         } else if (choice == -2) {
+            clear_previous_output();
             host.closeHost();
+            std::cout << "\033[?1049l";
             return 0;
         }
     }
-
+    clear_previous_output();
+    std::cout << std::flush;
     if (!preset_uri.empty()) host.apply_preset(preset_uri, preset_label);
     if (!host.initUi()) return 1;
 
-    host.run_ui_loop();
+    host.startUi();
+    //host.run_ui_loop();
 
     return 0;
 }
