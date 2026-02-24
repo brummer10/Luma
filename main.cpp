@@ -14,10 +14,12 @@
 
 #include "LV2Host.hpp"
 #include "JackEngine.hpp"
+#ifndef NOGUI
 #include "X11UiBackend.cpp"
 #include "StubGuiBackend.cpp"
 #if defined(HAVE_GTK2)
 #include "GTK2UiBackend.cpp"
+#endif
 #endif
 
 #include <iostream>
@@ -387,8 +389,10 @@ int print_centered(const std::vector<std::string>& lines, int term_width) {
 
 int main(int argc, char *argv[]) {
 
+    #ifndef NOGUI
     if (0 == XInitThreads())
         std::cerr << "Warning: XInitThreads() failed\n";
+    #endif
     #ifndef DEBUG
     AltScreenGuard screen;
     #endif
@@ -430,10 +434,12 @@ while (run) {
     
     LV2Host* host = mh.create_instance();
     host->set_engine(std::make_unique<JackEngine>());
+    #ifndef NOGUI
     host->register_ui_backend(std::make_shared<X11UiBackend>());
     host->register_ui_backend(std::make_shared<StubGuiBackend>());
     #if defined(HAVE_GTK2)
     host->register_ui_backend(std::make_shared<Gtk2UiBackend>());
+    #endif
     #endif
     
     auto matches = host->find_plugin_matches(uri);
