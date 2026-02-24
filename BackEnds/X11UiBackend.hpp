@@ -35,6 +35,7 @@ public:
 
     // window lifecycle
     bool create_window(int w, int h) override;
+    void close_window() override;
     void embed_native(void* child) override;
     void resize(int w, int h) override;
     void finalize_window(const char* title) override;

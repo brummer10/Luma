@@ -27,6 +27,7 @@ public:
 
     virtual const char* lv2_ui_uri() const = 0;
     virtual bool create_window(int w, int h) = 0;
+    virtual void close_window() = 0;
     virtual void embed_native(void* child) = 0;
     virtual void resize(int w, int h) = 0;
     virtual void finalize_window(const char* title) = 0;

@@ -1,136 +1,183 @@
 # Luma
 
-**Luma** is a minimal LV2 host for Linux that runs LV2 plugins with X11 user interfaces using JACK for audio. It is designed to be small, simple, and easy to understand — a compact reference implementation that still supports real-world LV2 features like presets and plugin state.
+**Luma** is a lightweight, multi-instance LV2 host for Linux designed for clarity, correctness, and debugging.
 
-Luma focuses on correctness and clarity rather than feature bloat. It is useful as:
+It supports real-world LV2 plugins including X11 and GTK2 user interfaces, advanced LV2 extensions such as `data-access`, and a fully functional terminal-based NO-GUI mode.
 
-* a lightweight LV2 plugin launcher
-* a reference host implementation
-* a development and debugging tool for LV2 plugins
-* a minimal example of LV2 + JACK + X11 integration
+Luma is intentionally compact, readable, and suitable as both:
+
+- a minimal plugin launcher  
+- a reference LV2 host implementation  
+- a development and debugging tool  
+- a headless LV2 runner  
+- a testbed for LV2 UI and Atom interaction  
 
 ---
 
 ## Features
 
-* Loads and runs LV2 plugins
-* Supports X11-based LV2 UIs
-* Supports drag and drop
-* JACK audio integration
-* Preset discovery and interactive preset selection
-* Full LV2 state and preset restore support
-* Atom and control port handling
-* Worker thread support (LV2 Worker extension)
-* Minimal CLI interface
-* Very small and readable codebase
+### Core Hosting
+- Loads and runs LV2 plugins
+- Multi-instance support
+- Independent plugin engines
+- JACK audio integration
+- Proper LV2 feature negotiation
+- Clean shutdown handling
+- Signal-safe exit
+
+---
+
+### UI Support
+
+- X11-based LV2 UIs
+- GTK2-based LV2 UIs
+- Drag and Drop support
+- Resize handling
+- UI idle interface support
+- **NO-GUI mode via terminal interface**
+- Basic terminal control interaction (accessibility-friendly)
+
+Luma can run plugins entirely without graphical UI.  
+This makes it usable in:
+
+- SSH sessions
+- minimal desktop setups
+- accessibility-driven workflows
+- headless systems
+
+---
+
+### LV2 Extension Support
+
+- LV2 State extension
+- LV2 Preset discovery and restore
+- LV2 Worker extension
+- LV2 Atom support
+- LV2 data-access extension (required for Calf plugins)
+- URID mapping and resolution
+- Patch message handling
+- Full feature injection system
+
+---
+
+### Debug Mode
+
+Luma includes a dedicated debug mode using a **DummyEngine**.
+
+In debug mode:
+
+- The real JACK engine is replaced
+- All Atom events (DSP → UI and UI → DSP) are logged
+- Control change messages are printed
+- Patch:Set messages are decoded
+- URIDs are resolved to readable symbols
+- Feature negotiation becomes visible
+
+This makes Luma useful as:
+
+- an LV2 debugging tool
+- a development inspection host
+- a protocol analysis tool
+
+---
+
+### CLI Interface
+
+- Interactive terminal plugin browser
+- Paged navigation
+- Preset selection
+- Search by name or URI
+- Clean terminal restore on exit
+
+---
+
+## Feature Matrix
+
+| Feature | Supported |
+|----------|------------|
+| Multi-instance hosting | ✅ |
+| JACK audio backend | ✅ |
+| X11 UI | ✅ |
+| GTK2 UI | ✅ |
+| NO-GUI / Terminal mode | ✅ |
+| Drag & Drop | ✅ |
+| LV2 State | ✅ |
+| LV2 Presets (restore) | ✅ |
+| LV2 Worker | ✅ |
+| LV2 Atom | ✅ |
+| LV2 data-access | ✅ |
+| URID mapping | ✅ |
+| Resize handling | ✅ |
+| Debug Atom logging | ✅ |
+| Dummy audio engine | ✅ |
+| Preset saving | ❌ |
+| Plugin graph / routing | ❌ |
+| Session management | ❌ |
+| Qt UI backend | ❌ |
 
 ---
 
 ## Requirements
 
-Luma depends on:
+- Linux
+- JACK
+- X11
+- GTK2 (for GTK-based UIs)
+- Lilv (LV2 host library)
+- C++17 compatible compiler
 
-* Linux
-* JACK
-* X11
-* Lilv (LV2 host library)
-* A C++ compiler (g++ or clang++)
+Install dependencies (Debian/Ubuntu):
 
-Install dependencies on Debian/Ubuntu:
-
-```
-sudo apt install libjack-jackd2-dev liblilv-dev libx11-dev pkg-config
+```bash
+sudo apt install libjack-jackd2-dev liblilv-dev libx11-dev libgtk2.0-dev pkg-config
 ```
 
 ---
 
 ## Building
 
-Compile using:
-
-```
+```bash
 make
 ```
 
-Or manually:
+Manual:
 
-```
-g++ main.cpp -o luma `pkg-config --cflags --libs jack lilv-0 x11` -ldl
+```bash
+g++ main.cpp -o luma \
+    `pkg-config --cflags --libs jack lilv-0 x11 gtk+-2.0` \
+    -ldl -pthread
 ```
 
 ---
+
 ## Usage
 
-Start **Luma** by passing a plugin URI, plugin name, or a search string:
+Start Luma by passing:
 
-```
+```bash
 ./luma <string>
 ```
 
-If you start Luma **without arguments**, it shows a paged list of all installed LV2 plugins:
+If no argument is provided:
 
-```
+```bash
 ./luma
 ```
 
-The built-in terminal browser lets you navigate through the list page by page and select a plugin interactively.
+You get an interactive plugin browser.
 
 Controls:
 
-* **ENTER** → next page
-* **↑/↓** → page navigation
-* **number** → select plugin
-* **q** → quit
+- ENTER → next page
+- ↑ / ↓ → page navigation
+- number → select plugin
+- q → quit
 
-After selecting a plugin, Luma displays available presets (if any) and lets you choose one in the same way. Press **ENTER** to start the plugin with its default state.
+---
 
-Examples:
+### Preset Selection
 
-Search by name:
-
-```
-./luma neural
-```
-
-Start directly from URI:
-
-```
-./luma urn:brummer:neuralrack
-```
-
-If multiple plugins match the search string, Luma shows an interactive selection menu.
-
-### Example: passing a search string
-
-```
-./luma neural
-```
-
-If multiple plugins are found, Luma lists them and prompts you to select one:
-
-```
-Find 6 matches:
-[0] AIDA-X                [3] NeuralCapture
-[1] Neural Amp Modeler    [4] Neural Record
-[2] Neural Capture        [5] Neuralrack
-
-ENTER = next page | number = select plugin | q = quit
->
-```
-
-### Example: passing a URI
-
-```
-./luma urn:brummer:neuralrack
-```
-
-### Example: passing a name
-
-```
-./luma neuralrack
-```
-
-If only one plugin matches the search string, Luma presents a list of available presets (if any) and prompts you to select one:
+If presets are available:
 
 ```
 [0] OrangeCrunch
@@ -139,61 +186,60 @@ If only one plugin matches the search string, Luma presents a list of available 
 Select preset (ENTER = default):
 ```
 
-* Enter a preset number to load it
-* Or press ENTER to start with the default state
-
-If no presets are available, the plugin starts with its default state.
+- Enter number → load preset  
+- ENTER → default state  
 
 ---
 
-## How It Works
+## Architecture Overview
 
-Luma:
+Each plugin instance consists of:
 
-1. Loads the LV2 plugin using Lilv
-2. Instantiates the plugin with the required LV2 features
-3. Connects JACK audio ports
-4. Loads and restores preset state (if selected)
-5. Launches the plugin’s X11 UI
-6. Runs an event loop that synchronizes DSP and UI
+```
+LV2Host
+ ├── Engine (JACK or DummyEngine)
+ ├── UI Backend (X11 / GTK2 / NO-GUI)
+ ├── Worker Thread
+ ├── Atom Buffers
+ └── State / Preset Handling
+```
 
-The host implements enough of the LV2 specification to run modern plugins while remaining intentionally compact and readable.
+Multiple instances are managed by:
+
+```
+MultiHost
+ └── owns multiple LV2Host instances
+```
+
+Each plugin runs independently and can be routed freely via JACK (e.g. qjackctl).
 
 ---
 
-## Limitations
+## Design Philosophy
 
-* Only X11 UIs are supported
-* No session management
-* No plugin graph or routing system
-* No plugin chaining
-* No built-in preset saving (loading only)
+Luma intentionally avoids becoming a DAW.
 
-Luma is intentionally minimal.
+Instead, it focuses on:
+
+- correctness over feature bloat  
+- minimal, readable code  
+- real-world LV2 compliance  
+- debugging visibility  
+- predictable behavior  
+
+It is designed as a compact and understandable reference host.
 
 ---
 
 ## License
 
-Luma is released under the permissive BSD-3-Clause license.
-
----
-
-## Acknowledgements
-
-Built on top of:
-
-* LV2 and Lilv
-* JACK Audio Connection Kit
-* X11
-
-Thanks to the LV2 community for documentation and examples.
+BSD-3-Clause
 
 ---
 
 ## Author
 
-Luma is a minimal LV2 host created as a compact reference implementation and experimentation platform.
+Luma is a compact LV2 host created as a reference implementation and experimentation platform.
 
 ---
 

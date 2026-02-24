@@ -66,6 +66,16 @@ bool X11UiBackend::create_window(int w, int h) {
     return true;
 }
 
+void X11UiBackend::close_window() {
+    if (display_) {
+        if (window_)
+            XDestroyWindow(display_, window_);
+        XCloseDisplay(display_);
+    }
+    window_ = 0;
+    display_ = nullptr;
+}
+
 void X11UiBackend::embed_native(void* child) {
     if (!display_ || !window_ || !child)
         return;

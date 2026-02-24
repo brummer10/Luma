@@ -1,6 +1,6 @@
 
 /*
- * LV2JackX11Host.hpp
+ * LV2Host.hpp
  *
  * SPDX-License-Identifier:  BSD-3-Clause
  *
@@ -9,7 +9,7 @@
 
 
 /****************************************************************
-        LV2JackX11Host.h - a LV2 Host for X11 based plugins
+        LV2Host.h - a LV2 Host
 
 ****************************************************************/
 
@@ -36,6 +36,7 @@
 #include <lv2/state/state.h>
 #include <lv2/resize-port/resize-port.h>
 #include <lv2/instance-access/instance-access.h>
+#include <lv2/data-access/data-access.h>
 
 #include <dlfcn.h>
 #include <unistd.h>
@@ -60,7 +61,9 @@
 #include "NoGuiBackend.hpp"
 #include "DummyEngine.hpp"
 
+class LV2Host;
 
+static thread_local LV2Host* current_host = nullptr;
 /****************************************************************
         LV2Host - class to host LV2 plugins with X11 GUI's
 
@@ -105,18 +108,12 @@ private:
 class LV2Host : public IHostUiBridge {
 public:
     std::atomic<bool> close_ui{false};
-    explicit LV2Host(std::unique_ptr<IDspEngine> e = nullptr,
-        std::unique_ptr<IUiBackend> b = nullptr) 
+    explicit LV2Host() 
         : ctx(LV2HostContext::acquire())
         , world(ctx->world())
-        , plugs(ctx->plugs())
-        , engine(std::move(e))
-        , backend(std::move(b)) {
-        if (!engine) engine = std::make_unique<DummyEngine>();
-        if (!backend) backend = std::make_unique<NoGuiBackend>();
-        #if defined(DEBUG)
+        , plugs(ctx->plugs()) {
         engine = std::make_unique<DummyEngine>();
-        #endif
+        register_ui_backend(std::make_shared<NoGuiBackend>());
     }
 
     ~LV2Host() {
@@ -124,10 +121,19 @@ public:
         closeHost();
     }
 
+    void set_engine(std::unique_ptr<IDspEngine> e) {
+        #ifndef DEBUG
+        engine = std::move(e);
+        #endif
+    }
+
+    void register_ui_backend(std::shared_ptr<IUiBackend> b) {
+        if (b) available_backends.push_back(b);
+    }
+
     bool init(const char* uri) {
         plugin_uri = uri;
         if (!world) return false;
-        backend->attach_bridge(this);
         return init_lilv()
             && init_engine()
             && init_ports()
@@ -135,6 +141,7 @@ public:
     }
 
     bool initUi() {
+        select_backend_for_plugin();
         return init_ui()
             && engine->activate();
     }
@@ -144,7 +151,6 @@ public:
             lilv_instance_deactivate(instance);
         }
         stop_worker();
-        //stopUi();
         destroy_ui();
         if (ui_dl) {
             dlclose(ui_dl);
@@ -165,7 +171,8 @@ public:
             delete p.atom_state;
         }
         ports.clear();
-
+        if(backend) backend->close_window();
+        //stopUi();
         if (world) {
             freeNodes();
             world = nullptr;
@@ -180,11 +187,10 @@ public:
     void startUi() {
         ui_is_running.store(true);
         ui_thread = std::thread(&LV2Host::run_ui_loop, this);
-        #ifndef DEBUG
-        while (!shutdown_requestet.load())
+        if (!backend->lv2_ui_uri()) {
+            while (!shutdown_requestet.load())
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        #endif
-
+        }
     }
 
     void stopUi() {
@@ -195,14 +201,6 @@ public:
     }
 
     void run_ui_loop() {
-        const LV2UI_Idle_Interface* idle = nullptr;
-
-        if (ui_desc && ui_desc->extension_data) {
-            const void* ext =
-                ui_desc->extension_data(LV2_UI__idleInterface);
-
-            idle = static_cast<const LV2UI_Idle_Interface*>(ext);
-        }
 
         run.store(true, std::memory_order_release); 
         int idle_counter = 0;
@@ -472,7 +470,7 @@ public:
 ****************************************************************/
 
     void list_controls() const override {
-        for (auto& p : ports) {
+        for (const auto& p : ports) {
             if (p.is_control) {
                 printf("[%d] %s = %f\n",
                     p.index,
@@ -482,8 +480,70 @@ public:
         }
     }
 
+    uint32_t meter_count() const override {
+        uint32_t count = 0;
+        for (const auto& p : ports)
+            if (p.is_control && !p.is_input)
+                count++;
+        return count;
+    }
+
+    uint32_t get_meter_port_index(uint32_t index) const override {
+        uint32_t count = 0;
+        for (const auto& p : ports) {
+            if (p.is_control && !p.is_input) {
+                if (index == count) return p.index;
+                count++;
+            }
+        }
+        return count;
+    }
+
+    const char* meter_name(uint32_t index) const override {
+        uint32_t current = 0;
+        for (const auto& p : ports) {
+            if (p.is_control && !p.is_input) {
+                if (current == index) return p.symbol ? p.symbol : "?";
+                current++;
+            }
+        }
+        return "?";
+    }
+
+    float get_meter(uint32_t index) const override {
+        uint32_t current = 0;
+        for (const auto& p : ports) {
+            if (p.is_control && !p.is_input) {
+                if (current == index) {
+                    float min = p.fmin;
+                    float max = p.fmax;
+                    if (max <= min) return 0.0f;
+                    float norm = (p.control - min) / (max - min);
+                    return std::clamp(norm, 0.0f, 1.0f);
+                }
+                current++;
+            }
+        }
+        return 0.0f;
+    }
+
     uint32_t control_port_count() const override {
-        return ports.size();
+        uint32_t count = 0;
+        for (const auto& p : ports)
+            if (p.is_control && p.is_input)
+                count++;
+        return count;
+    }
+
+    uint32_t get_control_port_index(uint32_t index) const override {
+        uint32_t count = 0;
+        for (const auto& p : ports) {
+            if (p.is_control && p.is_input) {
+                if (index == count) return p.index;
+                count++;
+            }
+        }
+        return count;
     }
 
     void set_control(uint32_t index, float value) override {
@@ -497,9 +557,27 @@ public:
     }
 
     float get_control(uint32_t index) const override {
-        for (auto& p : ports) {
+        for (const auto& p : ports) {
             if (p.index == (size_t)index && p.is_control)
                 return p.control;
+        }
+
+        return 0.0f;
+    }
+
+    float get_control_min(uint32_t index) const override {
+        for (const auto& p : ports) {
+            if (p.index == (size_t)index && p.is_control)
+                return p.fmin;
+        }
+
+        return 0.0f;
+    }
+
+    float get_control_max(uint32_t index) const override {
+        for (const auto& p : ports) {
+            if (p.index == (size_t)index && p.is_control)
+                return p.fmax;
         }
 
         return 0.0f;
@@ -513,8 +591,7 @@ public:
         p.atom_state->ui_to_dsp.resize(size);
         memcpy(p.atom_state->ui_to_dsp.data(), data, size);
         p.atom_state->ui_to_dsp_type = type;
-        p.atom_state->ui_to_dsp_pending.store(true,
-            std::memory_order_release);
+        p.atom_state->ui_to_dsp_pending.store(true, std::memory_order_release);
     }
 
     const char* port_name(uint32_t port) const override {
@@ -695,6 +772,9 @@ private:
 
         float control = 0.0f;
         float defvalue = 0.0f;
+        float fmin = 0.0f;
+        float fmax = 0.0f;
+
         std::unique_ptr<IDspPort> engine_port;
 
         LV2_Atom_Sequence* atom = nullptr;
@@ -795,6 +875,9 @@ private:
         LV2_Feature make_path_feature;
         LV2_Feature free_path_feature;
         LV2_Feature bbl_feature;
+
+        LV2_Extension_Data_Feature data_access;
+        LV2_Feature data_access_feature;
     } features;
 
     void init_features() {
@@ -832,6 +915,10 @@ private:
         host_worker.schedule.schedule_work = host_schedule_work;
         host_worker.feature.URI  = LV2_WORKER__schedule;
         host_worker.feature.data = &host_worker.schedule;
+
+        features.data_access.data_access = data_access_cb;
+        features.data_access_feature.URI  = LV2_DATA_ACCESS_URI;
+        features.data_access_feature.data = &features.data_access;
     }
 
 /****************************************************************
@@ -1000,8 +1087,14 @@ private:
             if (p.is_control && p.is_input) {
                 LilvNode *pdflt, *pmin, *pmax;
                 lilv_port_get_range(plugin, lp, &pdflt, &pmin, &pmax);
-                if (pmin) lilv_node_free(pmin);
-                if (pmax) lilv_node_free(pmax);
+                if (pmin) {
+                    p.fmin = lilv_node_as_float(pmin);
+                    lilv_node_free(pmin);
+                }
+                if (pmax) {
+                    p.fmax = lilv_node_as_float(pmax);
+                    lilv_node_free(pmax);
+                }
                 if (pdflt) {
                     p.defvalue = lilv_node_as_float(pdflt);
                     lilv_node_free(pdflt);
@@ -1185,6 +1278,9 @@ private:
 
         if (p.is_control && size == sizeof(float)) {
             p.control = *(const float*)buf;
+            #if defined(DEBUG)
+            fprintf(stderr, "ui_write %s -> %f\n", p.symbol ? p.symbol : "?", p.control);
+            #endif
             return;
         }
 
@@ -1257,6 +1353,40 @@ private:
         return strcmp(ui_type, host_type) == 0;
     }
 
+    void select_backend_for_plugin() {
+        //backend.reset();
+        const LilvUIs* uis = lilv_plugin_get_uis(plugin);
+        if (!uis) return;
+        for (auto& b : available_backends) {
+            if (!b->lv2_ui_uri()) continue;
+            LilvNode* backend_uri = lilv_new_uri(world, b->lv2_ui_uri());
+            LILV_FOREACH(uis, i, uis) {
+                const LilvUI* cand = lilv_uis_get(uis, i);
+                const LilvNode* ui_type = nullptr;
+                if (lilv_ui_is_supported(cand, host_ui_supported,
+                                         backend_uri, &ui_type)) {
+                    backend = b;
+                    backend->attach_bridge(this);
+                    backend->set_close_callback([this]() {request_shutdown();});
+                    lilv_node_free(backend_uri);
+                    return;
+                }
+            }
+            lilv_node_free(backend_uri);
+        }
+        if (!available_backends.empty()) {
+            backend = available_backends.front();
+            backend->attach_bridge(this);
+            backend->set_close_callback([this]() {request_shutdown();});
+        }
+    }
+
+    static const void* data_access_cb(const char* uri) {
+        extern LV2Host* current_host;
+        if (!current_host || !current_host->instance) return nullptr;
+        return lilv_instance_get_extension_data(
+            current_host->instance, uri);
+    }
 
 /****************************************************************
             UI -init the UI (Host and Plugin)
@@ -1264,12 +1394,8 @@ private:
 ****************************************************************/
 
     bool init_ui() {
-        if (!backend->lv2_ui_uri()) {
-            backend->set_close_callback([this]() {request_shutdown();});
-            backend = std::make_unique<NoGuiBackend>();
-            backend->attach_bridge(this);
+        if (backend && !backend->lv2_ui_uri()) { // non gui mode
             if (!ui_needs_control_update.load()) load_defaults();
-            fprintf(stderr, "Running headless (NoGuiBackend)\n Press ctrl+c to quit\n");
             return true;
         }
         // Find supported LV2 UI
@@ -1291,11 +1417,16 @@ private:
         }
 
         lilv_node_free(backend_uri);
-
+        // should never happen, as we've checked that already 
+        // in select_backend_for_plugin()
         if (!ui) {
-            backend = std::make_unique<NoGuiBackend>();
+            backend = available_backends.front();
             backend->attach_bridge(this);
+            backend->set_close_callback([this]() {request_shutdown();});
             if (!ui_needs_control_update.load()) load_defaults();
+            if (!backend->create_window(640, 480)) {
+                return false;
+            }
             return true;
         }
 
@@ -1309,7 +1440,11 @@ private:
             fprintf(stderr, "dlopen failed\n");
             free(bundle);
             free(gui_uri);
-            return false;
+            backend = std::make_shared<NoGuiBackend>();
+            backend->attach_bridge(this);
+            backend->set_close_callback([this]() {request_shutdown();});
+            if (!ui_needs_control_update.load()) load_defaults();
+            return true;
         }
 
         auto fn = (const LV2UI_Descriptor* (*)(uint32_t)) dlsym(ui_dl, "lv2ui_descriptor");
@@ -1326,7 +1461,11 @@ private:
 
         if (!plugin_gui) {
             free(bundle);
-            return false;
+            backend = std::make_shared<NoGuiBackend>();
+            backend->attach_bridge(this);
+            backend->set_close_callback([this]() {request_shutdown();});
+            if (!ui_needs_control_update.load()) load_defaults();
+            return true;
         }
         ui_desc = plugin_gui;
         // Create backend window
@@ -1365,12 +1504,12 @@ private:
         instance_access_feature.URI  = LV2_INSTANCE_ACCESS_URI;
         instance_access_feature.data = plugin_instance;
 
-        LV2_Feature* feats[] = {&parent, &resize_f, &pm_f, &ui_options_feature,
-            &features.um_f, &features.unm_f, &instance_access_feature, nullptr};
-
+        LV2_Feature* feats[] = {&parent, &resize_f, &pm_f, &ui_options_feature, 
+            &features.um_f, &features.unm_f, &instance_access_feature, &features.data_access_feature, nullptr};
+        current_host = this;
         ui_handle = ui_desc->instantiate(ui_desc, plugin_uri, bundle, ui_write,
                                                         this, &ui_widget, feats);
-
+        current_host = nullptr;
         free(bundle);
         if (!ui_handle) return false;
 
@@ -1379,10 +1518,14 @@ private:
         std::string name = plugin_name;
         if (!preset_label.empty()) name += " - " + preset_label;
         backend->finalize_window(name.c_str());
-        backend->set_close_callback([this]() {request_shutdown();});
         if (!ui_needs_control_update.load()) {
             load_defaults();
             ui_needs_initial_update.store(true);
+        }
+
+        if (ui_desc && ui_desc->extension_data) {
+            const void* ext = ui_desc->extension_data(LV2_UI__idleInterface);
+            idle = static_cast<const LV2UI_Idle_Interface*>(ext);
         }
 
         return true;
@@ -1404,12 +1547,14 @@ private:
     const LilvPlugins* plugs =  nullptr;
     const LilvPlugin* plugin = nullptr;
     LilvInstance* instance = nullptr;
+    const LV2UI_Idle_Interface* idle = nullptr;
 
     LilvNode *audio_class, *control_class, *atom_class,
              *input_class, *x11_class,*rsz_minimumSize;
 
     std::unique_ptr<IDspEngine> engine;
-    std::unique_ptr<IUiBackend> backend;
+    std::vector<std::shared_ptr<IUiBackend>> available_backends;
+    std::shared_ptr<IUiBackend> backend = nullptr; 
 
     std::vector<Port> ports;
 

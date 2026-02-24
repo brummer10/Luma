@@ -13,6 +13,7 @@
 #include "IUiBackend.hpp"
 #include "IHostUiBridge.hpp"
 
+#include <termios.h>
 #include <iostream>
 #include <sstream>
 #include <sys/select.h>
@@ -22,6 +23,7 @@
     NoGuiBackend.hpp - this is the No UI backend for Luma LV2 host
 
 ****************************************************************/
+
 class NoGuiBackend : public IUiBackend {
 public:
     const char* lv2_ui_uri() const override {
@@ -29,6 +31,7 @@ public:
     }
 
     bool create_window(int, int) override { return true; }
+    void close_window() override {}
     void embed_native(void*) override {}
     void resize(int, int) override {}
     void finalize_window(const char*) override {}
@@ -40,6 +43,7 @@ public:
 
     void attach_bridge(IHostUiBridge* b) override {
         bridge = b;
+        begin_region_from_cursor();
         print_help();
     }
 
@@ -56,15 +60,33 @@ private:
     IHostUiBridge* bridge = nullptr;
     std::function<void()> close_cb;
 
-    int last_drawn_lines = 0;
 
-    void clear_output() {
-        if (last_drawn_lines <= 0) return;
-        // move cursor up
-        std::cout << "\033[" << last_drawn_lines << "A";
-        // clear to end of screen
+    bool get_cursor_position(int& row, int& col) {
+        termios oldt, newt;
+        tcgetattr(STDIN_FILENO, &oldt);
+        newt = oldt;
+        newt.c_lflag &= ~(ICANON | ECHO);
+        tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+        std::cout << "\033[6n" << std::flush;
+        char buf[32] = {0};
+        if (read(STDIN_FILENO, buf, sizeof(buf) - 1) <= 0) return false;
+        tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+        if (sscanf(buf, "\033[%d;%dR", &row, &col) != 2) return false;
+        return true;
+    }
+
+    int row = 0;
+    void begin_region_from_cursor() {
+        int col;
+        if (!get_cursor_position(row, col)) return;
+        std::cout << "\033[" << row << ";999r";
+        std::cout << "\033[" << row << ";1H";
+    }
+
+    void end_region() {
+        std::cout << "\033[r";
+        std::cout << "\033[" << row << ";1H";
         std::cout << "\033[J";
-        last_drawn_lines = 0;
     }
 
     bool stdin_ready() {
@@ -82,7 +104,7 @@ private:
         "\nNoGui Console Commands:\n"
         "  list              - show control ports\n"
         "  set <i> <value>   - set control\n"
-        "  ctrl+c              - exit\n\n";
+        "  quit              - exit\n\n";
     }
 
     void list_ports() {
@@ -97,13 +119,13 @@ private:
                 << bridge->port_name(i)
                 << " = "
                 << bridge->get_control(i)
+                << " min " << bridge->get_control_min(i)
+                << " / max " << bridge->get_control_max(i)
                 << "\n";
-            last_drawn_lines++;
         }
     }
 
     void handle_command(const std::string& line) {
-        clear_output();
         std::istringstream iss(line);
         std::string cmd;
         iss >> cmd;
@@ -116,16 +138,18 @@ private:
             float value;
 
             if (iss >> idx >> value && bridge) {
-                bridge->set_control(idx, value);
-                std::cout
-                    << bridge->port_name(idx)
-                    << " = " << value << "\n";
+                if (bridge->port_is_control(idx) &&
+                        bridge->port_is_input(idx)) {
+                    bridge->set_control(idx, value);
+                    std::cout << bridge->port_name(idx)
+                        << " = " << value << "\n";
+                }
             }
         }
         else if (cmd == "quit") {
+            end_region();
             if (close_cb) {
                 close_cb();
-                ::close(STDIN_FILENO);
             }
         }
         else if (!cmd.empty()) {
