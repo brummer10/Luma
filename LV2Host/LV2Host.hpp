@@ -1353,6 +1353,19 @@ private:
         return strcmp(ui_type, host_type) == 0;
     }
 
+    bool is_bridge_ui(const LilvUI* ui) {
+        if (!ui) return false;
+        char* bundle = lilv_node_get_path(lilv_ui_get_bundle_uri(ui), nullptr);
+        bool is_bridge = false;
+        if (bundle) {
+            if (strstr(bundle, "lv2-gtk2-ui-bridge") || strstr(bundle, "lv2-gtk-ui-bridge")) {
+                is_bridge = true;
+            }
+            free(bundle);
+        }
+        return is_bridge;
+    }
+
     void select_backend_for_plugin() {
         //backend.reset();
         const LilvUIs* uis = lilv_plugin_get_uis(plugin);
@@ -1362,6 +1375,7 @@ private:
             LilvNode* backend_uri = lilv_new_uri(world, b->lv2_ui_uri());
             LILV_FOREACH(uis, i, uis) {
                 const LilvUI* cand = lilv_uis_get(uis, i);
+                if (is_bridge_ui(cand)) continue;
                 const LilvNode* ui_type = nullptr;
                 if (lilv_ui_is_supported(cand, host_ui_supported,
                                          backend_uri, &ui_type)) {
@@ -1409,6 +1423,7 @@ private:
         // check if backend support plugin ui
         LILV_FOREACH(uis, i, uis) {
             const LilvUI* cand = lilv_uis_get(uis, i);
+            if (is_bridge_ui(cand)) continue;
             if (lilv_ui_is_supported(cand, host_ui_supported, backend_uri, &ui_type)) {
                 ui = cand;
                 gui_uri = strdup (lilv_node_as_uri (lilv_ui_get_uri(ui)));
