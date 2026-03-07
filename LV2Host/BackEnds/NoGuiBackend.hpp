@@ -30,11 +30,12 @@ public:
         return nullptr;
     }
 
-    bool create_window(int, int) override { return true; }
+    bool create_ui(int, int) override { return true; }
     void close_window() override {}
     void embed_native(void*) override {}
     void resize(int, int) override {}
     void finalize_window(const char*) override {}
+    void set_preset_name(const std::string) override {};
     void* native_window() override { return nullptr; }
 
     void set_close_callback(std::function<void()> cb) override {

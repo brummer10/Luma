@@ -1,58 +1,44 @@
 
-CXX      := g++
-TARGET   := luma
-SRC      := main.cpp
-INCL     := -I. -I./BackEnds -I./Engines -I./LV2Host
-OBJ      := $(SRC:.cpp=.o)
-DEP      := $(OBJ:.o=.d)
+include libxputty/Build/Makefile.base
 
-# Default packages (GUI build)
-PKGS := jack lilv-0 x11
+NOGOAL := install all features nogui
 
-GTK2CXXFLAGS :=
-EXTRA_DEFS   :=
+PASS := features 
 
-# Detect NOGUI target
-ifneq (,$(findstring nogui,$(MAKECMDGOALS)))
-    $(info Building in NO-GUI mode)
-    PKGS := jack lilv-0
-    EXTRA_DEFS += -DNOGUI
-else
-    # GTK2 auto-detect (only if not clean and not nogui)
-    ifeq (,$(findstring clean,$(MAKECMDGOALS)))
-        GTK2_FOUND := $(shell pkg-config --exists gtk+-2.0 && echo 1)
-        ifeq ($(GTK2_FOUND),1)
-            $(info GTK2 found — enabling GTK support)
-            PKGS += gtk+-2.0
-            GTK2CXXFLAGS += -DHAVE_GTK2 -Wno-deprecated-declarations
-        else
-            $(info GTK2 not found — building X11 only)
-        endif
-    endif
+SUBDIR := Luma
+
+.PHONY: $(SUBDIR) libxputty  recurse 
+
+$(MAKECMDGOALS) recurse: $(SUBDIR)
+
+check-and-reinit-submodules :
+ifeq (,$(filter $(NOGOAL),$(MAKECMDGOALS)))
+ifeq (,$(findstring clean,$(MAKECMDGOALS)))
+	@if git submodule status 2>/dev/null | egrep -q '^[-]|^[+]' ; then \
+		echo "$(red)INFO: Need to reinitialize git submodules$(reset)"; \
+		git submodule update --init; \
+		echo "$(blue)Done$(reset)"; \
+	else echo "$(blue)Submodule up to date$(reset)"; \
+	fi
+endif
 endif
 
-PKG_CFLAGS := $(shell pkg-config --cflags $(PKGS))
-PKG_LIBS   := $(shell pkg-config --libs   $(PKGS))
+libxputty: check-and-reinit-submodules
+ifeq (,$(filter $(NOGOAL),$(MAKECMDGOALS)))
+ifeq (,$(wildcard ./libxputty/xputty/resources/LV2Host.png))
+	@cp ./Luma/Resources/*.png ./libxputty/xputty/resources/
+endif
+	@exec $(MAKE) --no-print-directory -j 1 -C $@ $(MAKECMDGOALS)
+endif
 
-CXXFLAGS += -std=c++17 -Wall -Wextra -O2 $(EXTRA_DEFS)
-LDFLAGS  := -ldl
-
-all: $(TARGET)
-
-nogui: clean all
-
-$(TARGET): $(OBJ)
-	$(CXX) $^ -o $@ $(PKG_LIBS) $(LDFLAGS)
-
-%.o: %.cpp
-	$(CXX) $(CXXFLAGS) $(GTK2CXXFLAGS) $(INCL) $(PKG_CFLAGS) -MMD -MP -c $< -o $@
-
--include $(DEP)
-
-debug: CXXFLAGS := -std=c++17 -Wall -Wextra -g -O0 -DDEBUG
-debug: clean all
+$(SUBDIR): libxputty 
+ifeq (,$(filter $(PASS),$(MAKECMDGOALS)))
+	@exec $(MAKE) --no-print-directory -j 1 -C $@ $(MAKECMDGOALS)
+endif
 
 clean:
-	rm -f $(TARGET) $(OBJ) $(DEP)
+	@rm -f ./libxputty/xputty/resources/LV2Host.png
 
-.PHONY: all clean debug nogui
+
+features:
+

@@ -7,16 +7,7 @@
  * Copyright (C) 2026 brummer <brummer@web.de>
  */
 
-
-/****************************************************************
-        LV2Host.h - a LV2 Host
-
-****************************************************************/
-
-//  g++ -g main.cpp -o lv2host `pkg-config --cflags --libs jack lilv-0 x11` -ldl
-
 #pragma once
-
 
 #include "lv2_ringbuffer.h"
 
@@ -54,6 +45,15 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <filesystem>
+#include <cctype>
+
+#include "URIDs.h"
+#include "LV2HostTypes.hpp"
+#include "LV2HostPorts.hpp"
+#include "LV2HostState.hpp"
+#include "LV2HostWorker.hpp"
+#include "LV2HostContext.hpp"
 
 #include "IDspEngine.hpp"
 #include "IHostUiBridge.hpp"
@@ -65,47 +65,11 @@ class LV2Host;
 
 static thread_local LV2Host* current_host = nullptr;
 /****************************************************************
-        LV2Host - class to host LV2 plugins with X11 GUI's
+        LV2Host - class to host LV2 plugins
 
 ****************************************************************/
 
-class LV2HostContext {
-public:
-    static std::shared_ptr<LV2HostContext> acquire() {
-        static std::weak_ptr<LV2HostContext> weak;
-        static std::mutex m;
-
-        std::lock_guard<std::mutex> lock(m);
-
-        auto ctx = weak.lock();
-        if (!ctx) {
-            ctx = std::shared_ptr<LV2HostContext>(new LV2HostContext());
-            weak = ctx;
-        }
-
-        return ctx;
-    }
-
-    LilvWorld* world() const { return world_; }
-    const LilvPlugins* plugs() const { return plugs_; }
-
-    ~LV2HostContext() {
-        lilv_world_free(world_);
-    }
-
-private:
-    LV2HostContext() {
-
-        world_ = lilv_world_new();
-        lilv_world_load_all(world_);
-        plugs_ = lilv_world_get_all_plugins(world_);
-    }
-
-    LilvWorld* world_;
-    const LilvPlugins* plugs_;
-};
-
-class LV2Host : public IHostUiBridge {
+class LV2Host : public IHostUiBridge, public LV2HostState {
 public:
     std::atomic<bool> close_ui{false};
     explicit LV2Host() 
@@ -113,7 +77,9 @@ public:
         , world(ctx->world())
         , plugs(ctx->plugs()) {
         engine = std::make_unique<DummyEngine>();
-        register_ui_backend(std::make_shared<NoGuiBackend>());
+        auto noGui = std::make_shared<NoGuiBackend>();
+        register_ui_backend(noGui);
+        backend = noGui;
     }
 
     ~LV2Host() {
@@ -124,6 +90,8 @@ public:
     void set_engine(std::unique_ptr<IDspEngine> e) {
         #ifndef DEBUG
         engine = std::move(e);
+        #else
+        (void) e;
         #endif
     }
 
@@ -131,26 +99,36 @@ public:
         if (b) available_backends.push_back(b);
     }
 
+    bool is_nogui() {
+        return !backend || backend->lv2_ui_uri() == nullptr ? true : false;
+    }
+
     bool init(const char* uri) {
         plugin_uri = uri;
         if (!world) return false;
-        return init_lilv()
-            && init_engine()
-            && init_ports()
-            && init_instance();
+        bool set = init_lilv() && init_engine() && init_ports() && init_instance();
+        if (set) {
+            init_state(world, plugin, instance, um, unm, &ports, plugin_name,
+                &ui_needs_control_update, &ui_needs_initial_update);
+            store_default(feat_);
+        } else {
+            closeHost();
+        }
+        return set;
     }
 
     bool initUi() {
         select_backend_for_plugin();
-        return init_ui()
-            && engine->activate();
+        if (init_ui()) return engine->activate();
+        return false;
     }
 
     void closeHost() {
         if (instance) {
             lilv_instance_deactivate(instance);
         }
-        stop_worker();
+        ctx->unregister_worker(&host_worker);
+        host_worker.stop_worker();
         destroy_ui();
         if (ui_dl) {
             dlclose(ui_dl);
@@ -176,7 +154,8 @@ public:
         if (world) {
             freeNodes();
             world = nullptr;
-        }        
+        }
+        is_down.store(true);
     }
 
 /****************************************************************
@@ -185,11 +164,33 @@ public:
 ****************************************************************/
 
     void startUi() {
-        ui_is_running.store(true);
-        ui_thread = std::thread(&LV2Host::run_ui_loop, this);
-        if (!backend->lv2_ui_uri()) {
-            while (!shutdown_requestet.load())
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        if (!ui_is_running.load()) {
+            ui_is_running.store(true);
+            setRun();
+            ui_thread = std::thread(&LV2Host::run_ui_loop, this);
+            if (!backend->lv2_ui_uri()) {
+                while (!shutdown_requestet.load())
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+        }
+    }
+
+    void setRun() {
+        run.store(true, std::memory_order_release); 
+    }
+
+    bool getRun() {
+        return run.load(); 
+    }
+
+    bool isDown() {
+        return is_down.load(); 
+    }
+
+    void run_ui_loop() {
+        while (run.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(16)); // ~60 FPS
+            runUi();
         }
     }
 
@@ -200,17 +201,10 @@ public:
             }
     }
 
-    void run_ui_loop() {
-
-        run.store(true, std::memory_order_release); 
-        int idle_counter = 0;
-        bool resize_enabled = false;
-
-        while (run.load()) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(16)); // ~60 FPS
-
+    void runUi() {
+        if (run.load()) {
             if (shutdown_requestet.load()) {
-                fprintf(stderr, "Exit\n");
+                //fprintf(stderr, "Exit\n");
                 shutdown.store(true, std::memory_order_release);
                 run.store(false, std::memory_order_release);
                 close_ui.store(true, std::memory_order_release);
@@ -244,10 +238,6 @@ public:
             // run plugin UI idle loop
             if (idle && idle->idle && ui_handle) {
                 idle->idle(ui_handle);
-                if (!resize_enabled) {
-                    idle_counter++;
-                    if (idle_counter > 30) resize_enabled = true;
-                }
             }
         }
     }
@@ -262,57 +252,8 @@ public:
 
 ****************************************************************/
 
-    struct InfoPair {
-        std::string uri;
-        std::string label;
-    };
-
     std::vector<InfoPair> find_plugin_matches(const std::string& input) {
-
-        // uri / name
-        std::vector<InfoPair> results;
-        // lowercase input
-        std::string needle = input;
-        std::transform(needle.begin(), needle.end(), needle.begin(), ::tolower);
-
-        LILV_FOREACH(plugins, i, plugs) {
-
-            const LilvPlugin* p = lilv_plugins_get(plugs, i);
-            std::string uri = lilv_node_as_uri(lilv_plugin_get_uri(p));
-            const LilvNode* name_node = lilv_plugin_get_name(p);
-            std::string name = name_node ? lilv_node_as_string(name_node) : "";
-            std::string lname = name;
-
-            // match rules
-            bool match = false;
-            if (!input.empty()) {
-                std::transform(lname.begin(), lname.end(), lname.begin(), ::tolower);
-                // exact URI
-                if (input == uri) match = true;
-                // exact name
-                if (input == name) match = true;
-                // case-insensitive exact name
-                if (needle == lname) match = true;
-                // substring
-                if (lname.find(needle) != std::string::npos) match = true;
-                // substring
-                if (uri.find(needle) != std::string::npos) match = true;
-            } else {
-                match = true;
-            }
-
-            if (match) {
-                InfoPair info;
-                info.uri = uri;
-                info.label = name;
-                results.emplace_back(info);
-            }
-        }
-        std::sort(results.begin(), results.end(),
-            [](const InfoPair& a, const InfoPair& b) {
-                return a.label < b.label;
-            });
-        return results;
+        return ctx->registry.find_plugin_matches(input);
     }
 
 /****************************************************************
@@ -320,148 +261,8 @@ public:
                      return a list with preset uri and name
 ****************************************************************/
 
-    std::vector<InfoPair> get_presets(const char* plugin_uri) {
-
-        std::vector<InfoPair> result;
-        LilvNode* uri = lilv_new_uri(world, plugin_uri);
-
-        const LilvPlugin* plugin = lilv_plugins_get_by_uri(
-                        lilv_world_get_all_plugins(world), uri);
-
-        if (!plugin) {
-            std::cerr << "Plugin not found\n";
-            lilv_node_free(uri);
-            return result;
-        }
-
-        LilvNode* preset_class = lilv_new_uri(world,
-                    "http://lv2plug.in/ns/ext/presets#Preset");
-
-        const LilvNodes* presets = lilv_plugin_get_related(plugin, preset_class);
-
-        if (!presets || lilv_nodes_size(presets) == 0) {
-            lilv_node_free(preset_class);
-            lilv_node_free(uri);
-            return result;
-        }
-
-        LilvNode* label_pred = lilv_new_uri(world,
-                    "http://www.w3.org/2000/01/rdf-schema#label");
-
-        LILV_FOREACH(nodes, i, presets) {
-            const LilvNode* preset = lilv_nodes_get(presets, i);
-            // load preset into world
-            lilv_world_load_resource(world, preset);
-            InfoPair info;
-            info.uri = lilv_node_as_uri(preset);
-            LilvNode* label = lilv_world_get(world, preset, label_pred, nullptr);
-
-            if (label && lilv_node_is_string(label)) {
-                info.label = lilv_node_as_string(label);
-                lilv_node_free(label);
-            } else {
-                info.label = "(no label)";
-            }
-            result.push_back(info);
-        }
-
-        lilv_node_free(label_pred);
-        lilv_node_free(preset_class);
-        lilv_node_free(uri);
-
-        std::sort(result.begin(), result.end(),
-            [](const InfoPair& a, const InfoPair& b) {
-                return a.label < b.label;
-            });
-        return result;
-    }
-
-/****************************************************************
-            STATE - load a preset
-
-****************************************************************/
-
-    static void set_port_value(const char* port_symbol, void* user_data,
-                   const void* value, uint32_t size, uint32_t type) {
-
-        (void) size;
-        (void) type;
-        auto* self = static_cast<LV2Host*>(user_data);
-        for (auto& p : self->ports) {
-            if (!p.is_control) continue;
-            if (strcmp(p.symbol, port_symbol) == 0) {
-                if (size == sizeof(float)) p.control = *(const float*)value;
-                break;
-            }
-        }
-    }
-
-    static char* make_path_func(LV2_State_Make_Path_Handle, const char* path) {
-        return strdup(path);
-    }
-
-    static char* map_path_func(LV2_State_Map_Path_Handle, const char* abstract_path) {
-        return strdup(abstract_path);
-    }
-
-    static void free_path_func(LV2_State_Free_Path_Handle, char* path) {
-        free(path);
-    }
-
-    LV2_State_Map_Path map_path;
-    LV2_State_Make_Path make_path;
-    LV2_State_Free_Path free_path;
-
-    void apply_preset(std::string presetUri, std::string presetLabel) {
-        preset_uri = presetUri;
-        preset_label = presetLabel;
-
-        LilvNode* preset = lilv_new_uri(world, preset_uri.c_str());
-        if (!preset) {
-            fprintf(stderr, "Invalid preset URI\n");
-            ui_needs_initial_update.store(true);
-            return ;
-        }
-
-        LilvState* state = lilv_state_new_from_world(world, &um, preset);
-
-        if (!state) {
-            char* path = lilv_file_uri_parse(preset_uri.c_str(), nullptr);
-            if (!path) {
-                fprintf(stderr, "Preset not found\n");
-                lilv_node_free(preset);
-                ui_needs_initial_update.store(true);
-                return ;
-            }
-
-            LilvState* state = lilv_state_new_from_file(world, &um, nullptr, path);
-            free(path);
-
-            if (!state) {
-                fprintf(stderr, "Failed to load preset\n");
-                lilv_node_free(preset);
-                ui_needs_initial_update.store(true);
-                return ;
-            }
-        }
-
-        const LV2_Feature* feat[] = {
-            &features.um_f,
-            &features.unm_f,
-            &features.map_path_feature,
-            &features.make_path_feature,
-            &features.free_path_feature,
-            &host_worker.feature,
-            nullptr
-        };
-
-        lilv_state_restore(state, instance, set_port_value, this, 0, feat);
-
-        lilv_state_free(state);
-        lilv_node_free(preset);
-
-        ui_needs_control_update.store(true);
-        ui_needs_initial_update.store(false);
+    std::vector<InfoPair> get_presets(const char* pluginUri) {
+        return ctx->registry.get_presets(pluginUri);
     }
 
 /****************************************************************
@@ -606,211 +407,47 @@ public:
         return ports[port].is_control;
     }
 
+    void set_resource(void* res) override {
+        hres = res;
+    }
+
+    void* get_resource() const override {
+        return hres;
+    }
+
+    const std::vector<InfoPair> get_presets() override {
+        return get_presets(plugin_uri.c_str());
+    }
+
+    void applyPreset(const std::string& uri, const std::string& label) override {
+        host_worker.wait_until_idle();
+        host_worker.clear_responses();
+        apply_preset(uri, feat_);
+        preset_label = label;
+        if (backend) backend->set_preset_name(preset_label);
+    }
+
+    bool savePresetBundle(const std::string& preset_name) override {
+        return save_preset_bundle(preset_name, feat_);
+    }
+
+    void restoreDefaults() override {
+        host_worker.wait_until_idle();
+        host_worker.clear_responses();
+        restore_default(feat_);
+        ui_needs_initial_update.store(true);
+    }
+
+    const std::string& getPluginName() const override {
+        return plugin_name;
+    }
+
 private:
-
-/****************************************************************
-                        WORKER
-
-****************************************************************/
-
-    struct WorkerRequest {
-        uint32_t size;
-        uint8_t  data[0];
-    };
-
-    struct WorkerResponse {
-        uint32_t size;
-        uint8_t  data[0];
-    };
-
-    struct LV2HostWorker {
-        lv2_ringbuffer_t* requests = nullptr;
-        lv2_ringbuffer_t* responses = nullptr;
-
-        LV2_Worker_Schedule schedule;
-        LV2_Feature feature;
-        const LV2_Worker_Interface* iface = nullptr;
-        LV2_Handle dsp_handle;
-
-        std::atomic<bool> running{false};;
-        std::atomic<bool> work_pending{false};;
-        std::thread worker_thread;
-    };
-
-    // store work request in ringbuffer
-    static LV2_Worker_Status host_schedule_work(
-                        LV2_Worker_Schedule_Handle handle,
-                        uint32_t size, const void* data) {
-
-        auto* w = (LV2HostWorker*)handle;
-        const size_t total = sizeof(uint32_t) + size;
-        if (lv2_ringbuffer_write_space(w->requests) < total)
-            return LV2_WORKER_ERR_NO_SPACE;
-
-        lv2_ringbuffer_write(w->requests, (const char*)&size, sizeof(uint32_t));
-        lv2_ringbuffer_write(w->requests, (const char*)data, size);
-        w->work_pending.store(true, std::memory_order_release); 
-
-        return LV2_WORKER_SUCCESS;
-    }
-
-    // worker thread, check if work is to be done, and do it
-    static void worker_thread_func(LV2HostWorker* w) {
-        while (w->running.load()) {
-            if (lv2_ringbuffer_read_space(w->requests) < sizeof(uint32_t)) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                continue;
-            }
-
-            if (lv2_ringbuffer_read_space(w->requests) < sizeof(uint32_t)) {
-                continue;
-            }
-
-            uint32_t size;
-            lv2_ringbuffer_peek(w->requests, (char*)&size, sizeof(uint32_t));
-
-            if (lv2_ringbuffer_read_space(w->requests) < sizeof(uint32_t) + size) {
-                 continue;
-            }
-
-            lv2_ringbuffer_read(w->requests, (char*)&size, sizeof(uint32_t));
-            std::vector<uint8_t> buf(size);
-            lv2_ringbuffer_read(w->requests, (char*)buf.data(), size);
-            w->iface->work(w->dsp_handle, host_respond, w, size, buf.data());
-        }
-    }
-
-    // store response in ringbuffer when work is done
-    static LV2_Worker_Status host_respond(
-                        LV2_Worker_Respond_Handle handle,
-                        uint32_t size, const void* data) {
-
-        auto* w = (LV2HostWorker*)handle;
-        const size_t total = sizeof(uint32_t) + size;
-
-        if (lv2_ringbuffer_write_space(w->responses) < total)
-            return LV2_WORKER_ERR_NO_SPACE;
-
-        lv2_ringbuffer_write(w->responses, (const char*)&size, sizeof(uint32_t));
-
-        lv2_ringbuffer_write(w->responses,(const char*)data, size);
-
-        return LV2_WORKER_SUCCESS;
-    }
-
-    // inform plugin when work is done
-    void deliver_worker_responses(LV2HostWorker* w) {
-        while (true) {
-            if (lv2_ringbuffer_read_space(w->responses) < sizeof(uint32_t)) break;
-
-            uint32_t size;
-            lv2_ringbuffer_peek(w->responses, (char*)&size, sizeof(uint32_t));
-
-            if (lv2_ringbuffer_read_space(w->responses) < sizeof(uint32_t) + size) break;
-
-            lv2_ringbuffer_read(w->responses, (char*)&size, sizeof(uint32_t));
-
-            std::vector<uint8_t> buf(size);
-            lv2_ringbuffer_read(w->responses, (char*)buf.data(), size);
-
-            w->iface->work_response(w->dsp_handle, size, buf.data());
-        }
-    }
-
-    // stop worker thread on exit
-    void stop_worker() {
-        if (!host_worker.running.exchange(false))
-            return;
-
-        if (host_worker.worker_thread.joinable())
-            host_worker.worker_thread.join();
-
-        if (host_worker.requests) {
-            lv2_ringbuffer_free(host_worker.requests);
-            host_worker.requests = nullptr;
-        }
-
-        if (host_worker.responses) {
-            lv2_ringbuffer_free(host_worker.responses);
-            host_worker.responses = nullptr;
-        }
-
-        host_worker.iface = nullptr;
-        host_worker.dsp_handle = nullptr;
-    }
-
-    LV2HostWorker host_worker;
-
-/****************************************************************
-                        PORT DATA
-
-****************************************************************/
-
-    struct AtomState {
-        std::vector<uint8_t> ui_to_dsp;
-        uint32_t ui_to_dsp_type = 0;
-        std::atomic<bool> ui_to_dsp_pending{false};
-
-        lv2_ringbuffer_t* dsp_to_ui = nullptr;
-
-        AtomState(size_t sz = 16384) {
-            dsp_to_ui = lv2_ringbuffer_create(sz);
-        }
-
-        ~AtomState() {
-            lv2_ringbuffer_free(dsp_to_ui);
-        }
-    };
-
-    struct Port {
-        uint32_t index = 0;
-        bool is_audio = false;
-        bool is_input = false;
-        bool is_control = false;
-        bool is_atom = false;
-        bool is_midi = false;
-
-        float control = 0.0f;
-        float defvalue = 0.0f;
-        float fmin = 0.0f;
-        float fmax = 0.0f;
-
-        std::unique_ptr<IDspPort> engine_port;
-
-        LV2_Atom_Sequence* atom = nullptr;
-        uint32_t atom_buf_size = 8192;
-        AtomState* atom_state = nullptr;
-
-        std::string uri;
-        const char* symbol = nullptr;
-    };
 
 /****************************************************************
                         URIDs
 
 ****************************************************************/
-
-    struct {
-        LV2_URID atom_eventTransfer;
-        LV2_URID atom_Sequence;
-        LV2_URID atom_Object;
-        LV2_URID atom_Float;
-        LV2_URID atom_Int;
-        LV2_URID atom_Double;
-        LV2_URID atom_Bool;
-        LV2_URID midi_Event;
-        LV2_URID buf_maxBlock;
-        LV2_URID atom_Path;
-        LV2_URID atom_String;
-        LV2_URID patch_Get;
-        LV2_URID patch_Set;
-        LV2_URID patch_property;
-        LV2_URID patch_value;
-        LV2_URID atom_URID;
-        LV2_URID atom_Blank;
-        LV2_URID atom_Chunk;
-        LV2_URID param_sampleRate;
-    } urids;
 
     void init_urids() {
         urids.atom_eventTransfer = map_uri(this, LV2_ATOM__eventTransfer);
@@ -867,6 +504,23 @@ private:
                         FEATURES
 
 ****************************************************************/
+
+    static char* make_path_func(LV2_State_Make_Path_Handle, const char* path) {
+        return strdup(path);
+    }
+
+    static char* map_path_func(LV2_State_Map_Path_Handle, const char* abstract_path) {
+        return strdup(abstract_path);
+    }
+
+    static void free_path_func(LV2_State_Free_Path_Handle, char* path) {
+        free(path);
+    }
+
+    LV2_State_Map_Path map_path;
+    LV2_State_Make_Path make_path;
+    LV2_State_Free_Path free_path;
+
     struct {
         LV2_Feature um_f;
         LV2_Feature unm_f;
@@ -912,7 +566,7 @@ private:
         features.free_path_feature.data = &free_path;
 
         host_worker.schedule.handle = &host_worker;
-        host_worker.schedule.schedule_work = host_schedule_work;
+        host_worker.schedule.schedule_work = host_worker.host_schedule_work;
         host_worker.feature.URI  = LV2_WORKER__schedule;
         host_worker.feature.data = &host_worker.schedule;
 
@@ -920,6 +574,16 @@ private:
         features.data_access_feature.URI  = LV2_DATA_ACCESS_URI;
         features.data_access_feature.data = &features.data_access;
     }
+
+    const LV2_Feature* feat_[7] = {
+        &features.um_f,
+        &features.unm_f,
+        &features.map_path_feature,
+        &features.make_path_feature,
+        &features.free_path_feature,
+        &host_worker.feature,
+        nullptr
+    };
 
 /****************************************************************
         LILV - init world and check if plugin is supported
@@ -976,7 +640,7 @@ private:
 
     bool init_lilv() {
 
-        plugin = lilv_plugins_get_by_uri(plugs, lilv_new_uri(world, plugin_uri));
+        plugin = lilv_plugins_get_by_uri(plugs, lilv_new_uri(world, plugin_uri.c_str()));
         if (!plugin) return false;
         plugin_name = "lv2-x11-host";
         const LilvNode* nd = nullptr;
@@ -1034,77 +698,10 @@ private:
 ****************************************************************/
 
     bool init_ports() {
-        uint32_t n = lilv_plugin_get_num_ports(plugin);
-        ports.reserve(n);
-        LilvNode* midi_event = lilv_new_uri(world, LV2_MIDI__MidiEvent);
+        hports.init(world, plugin, engine.get(), required_atom_size, audio_class,
+                    control_class, atom_class, input_class, urids);
 
-        for (uint32_t i = 0; i < n; ++i) {
-            const LilvPort* lp = lilv_plugin_get_port_by_index(plugin, i);
-            Port p;
-            p.index = i;
-
-            p.is_audio   = lilv_port_is_a(plugin, lp, audio_class);
-            p.is_control = lilv_port_is_a(plugin, lp, control_class);
-            p.is_atom    = lilv_port_is_a(plugin, lp, atom_class);
-            p.is_input   = lilv_port_is_a(plugin, lp, input_class);
-            p.is_midi    = lilv_port_supports_event(plugin, lp, midi_event);
-
-            const LilvNode* sym = lilv_port_get_symbol(plugin, lp);
-            if (sym) {
-                p.uri = std::string(lilv_node_as_uri(lilv_plugin_get_uri(plugin)))
-                      + "#" + lilv_node_as_string(sym);
-                p.symbol = lilv_node_as_string(sym);
-                }
-
-            if (p.is_audio) {
-                p.engine_port = engine->create_audio_port(sym ? 
-                    p.symbol : "audio",p.is_input ? true : false);
-            }
-
-            if (p.is_atom && p.is_midi) {
-                p.engine_port = engine->create_midi_port(sym ? 
-                    p.symbol : "midi",p.is_input ? true : false);
-            }
-
-            if (p.is_atom) {
-                p.atom_buf_size = required_atom_size;
-
-                p.atom = (LV2_Atom_Sequence*)aligned_alloc(64, p.atom_buf_size);
-                memset(p.atom, 0, p.atom_buf_size);
-                p.atom->atom.type = urids.atom_Sequence;
-
-                if (p.is_input) {
-                    p.atom->atom.size = sizeof(LV2_Atom_Sequence_Body);
-                    p.atom->body.unit = 0;
-                    p.atom->body.pad  = 0;
-                } else {
-                    p.atom->atom.size = 0;
-                }
-
-                p.atom_state = new AtomState;
-            }
-
-            if (p.is_control && p.is_input) {
-                LilvNode *pdflt, *pmin, *pmax;
-                lilv_port_get_range(plugin, lp, &pdflt, &pmin, &pmax);
-                if (pmin) {
-                    p.fmin = lilv_node_as_float(pmin);
-                    lilv_node_free(pmin);
-                }
-                if (pmax) {
-                    p.fmax = lilv_node_as_float(pmax);
-                    lilv_node_free(pmax);
-                }
-                if (pdflt) {
-                    p.defvalue = lilv_node_as_float(pdflt);
-                    lilv_node_free(pdflt);
-                }
-            }
-
-            ports.emplace_back(std::move(p));
-        }
-        lilv_node_free(midi_event);
-        return true;
+        return hports.init_ports(ports);
     }
 
 /****************************************************************
@@ -1139,8 +736,7 @@ private:
             host_worker.requests  = lv2_ringbuffer_create(8192);
             host_worker.responses = lv2_ringbuffer_create(8192);
             host_worker.running.store(true);
-            host_worker.worker_thread =
-                std::thread(worker_thread_func, &host_worker);
+            ctx->register_worker(&host_worker);
         }
         // connect control and atom ports
         for (auto& p : ports) {
@@ -1225,7 +821,7 @@ private:
         // run the plugin
         lilv_instance_run(instance, nframes);
         // deliver worker response (work done)
-        if (host_worker.iface ) deliver_worker_responses(&host_worker);
+        if (host_worker.iface ) host_worker.deliver_worker_responses();
         // handle atom output ports (dsp to GUI)
         for (Port& p : ports) {
             // send control output port values to the UI
@@ -1239,7 +835,7 @@ private:
                     if (ev->body.size == 0)break;
                     if (p.atom->atom.type == 0) break;
                     #if defined(DEBUG)
-                    dump_atom_event(ev, "DSP => UI");
+                    dump_atom_event(ev, "DSP => UI", true);
                     #endif
                     const uint32_t total = sizeof(LV2_Atom) + ev->body.size;
                     if (lv2_ringbuffer_write_space(p.atom_state->dsp_to_ui) >= total) {
@@ -1369,9 +965,9 @@ private:
     void select_backend_for_plugin() {
         //backend.reset();
         const LilvUIs* uis = lilv_plugin_get_uis(plugin);
-        if (!uis) return;
         for (auto& b : available_backends) {
             if (!b->lv2_ui_uri()) continue;
+            if (!uis) continue;
             LilvNode* backend_uri = lilv_new_uri(world, b->lv2_ui_uri());
             LILV_FOREACH(uis, i, uis) {
                 const LilvUI* cand = lilv_uis_get(uis, i);
@@ -1439,7 +1035,7 @@ private:
             backend->attach_bridge(this);
             backend->set_close_callback([this]() {request_shutdown();});
             if (!ui_needs_control_update.load()) load_defaults();
-            if (!backend->create_window(640, 480)) {
+            if (!backend->create_ui(640, 480)) {
                 return false;
             }
             return true;
@@ -1455,7 +1051,7 @@ private:
             fprintf(stderr, "dlopen failed\n");
             free(bundle);
             free(gui_uri);
-            backend = std::make_shared<NoGuiBackend>();
+            backend = available_backends.front();
             backend->attach_bridge(this);
             backend->set_close_callback([this]() {request_shutdown();});
             if (!ui_needs_control_update.load()) load_defaults();
@@ -1476,7 +1072,7 @@ private:
 
         if (!plugin_gui) {
             free(bundle);
-            backend = std::make_shared<NoGuiBackend>();
+            backend = available_backends.front();
             backend->attach_bridge(this);
             backend->set_close_callback([this]() {request_shutdown();});
             if (!ui_needs_control_update.load()) load_defaults();
@@ -1484,7 +1080,7 @@ private:
         }
         ui_desc = plugin_gui;
         // Create backend window
-        if (!backend->create_window(640, 480)) {
+        if (!backend->create_ui(640, 480)) {
             free(bundle);
             return false;
         }
@@ -1519,10 +1115,10 @@ private:
         instance_access_feature.URI  = LV2_INSTANCE_ACCESS_URI;
         instance_access_feature.data = plugin_instance;
 
-        LV2_Feature* feats[] = {&parent, &resize_f, &pm_f, &ui_options_feature, 
-            &features.um_f, &features.unm_f, &instance_access_feature, &features.data_access_feature, nullptr};
+        LV2_Feature* feats[] = {&parent, &resize_f, &pm_f, &ui_options_feature, &features.um_f,
+             &features.unm_f, &instance_access_feature, &features.data_access_feature, nullptr};
         current_host = this;
-        ui_handle = ui_desc->instantiate(ui_desc, plugin_uri, bundle, ui_write,
+        ui_handle = ui_desc->instantiate(ui_desc, plugin_uri.c_str(), bundle, ui_write,
                                                         this, &ui_widget, feats);
         current_host = nullptr;
         free(bundle);
@@ -1552,8 +1148,12 @@ private:
 
 ****************************************************************/
 
+    LV2HostWorker host_worker;
+    LV2HostPorts hports;
+    URIDs urids;
+
     std::shared_ptr<LV2HostContext> ctx;
-    const char* plugin_uri;
+    std::string plugin_uri;
     std::string preset_uri;
     std::string preset_label;
     std::string plugin_name;
@@ -1563,6 +1163,7 @@ private:
     const LilvPlugin* plugin = nullptr;
     LilvInstance* instance = nullptr;
     const LV2UI_Idle_Interface* idle = nullptr;
+    LilvState* default_state = nullptr;
 
     LilvNode *audio_class, *control_class, *atom_class,
              *input_class, *x11_class,*rsz_minimumSize;
@@ -1579,8 +1180,9 @@ private:
     LV2UI_Handle ui_handle = nullptr;
     LV2UI_Widget ui_widget = nullptr;
 
-    //Display* x_display = nullptr;
-    //Window x_window = 0;
+    //resource to share via IHostUiBridge
+    void* hres = nullptr;
+
     int wx = 640;
     int wy = 480;
 
@@ -1594,6 +1196,7 @@ private:
     std::atomic<bool> ui_needs_initial_update{false};
     std::atomic<bool> ui_needs_control_update{false};
     std::atomic<bool> run{false};
+    std::atomic<bool> is_down{false};
     std::atomic<bool> shutdown{false};
     std::atomic<bool> shutdown_requestet{false};
 };

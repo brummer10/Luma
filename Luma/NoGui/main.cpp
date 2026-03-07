@@ -12,7 +12,7 @@
 
 ****************************************************************/
 
-#include "LV2Host.hpp"
+#include "MultiHost.hpp"
 #include "JackEngine.hpp"
 #ifndef NOGUI
 #include "X11UiBackend.cpp"
@@ -40,29 +40,6 @@
 #include <sys/select.h>
 #include <fcntl.h>
 #include <cctype>
-
-class MultiHost {
-public:
-    LV2Host* create_instance() {
-        auto host = std::make_unique<LV2Host>();
-        auto ptr = host.get();
-        hosts.push_back(std::move(host));
-        return ptr;
-    }
-
-    void shutdown_all() {
-        for (auto& h : hosts)
-            h->request_shutdown();
-        hosts.clear();
-    }
-
-  //  ~MultiHost() {
-   //     shutdown_all();
-  //  }
-
-private:
-    std::vector<std::unique_ptr<LV2Host>> hosts;
-};
 
 MultiHost mh;
 
@@ -135,7 +112,8 @@ KeyResult read_key()
                 if (fdsi.ssi_signo == SIGINT || fdsi.ssi_signo == SIGTERM ||
                         fdsi.ssi_signo == SIGHUP || fdsi.ssi_signo == SIGQUIT) {
                     shutdown.store(true, std::memory_order_release);
-                    mh.shutdown_all();
+                    //mh.shutdown_all();
+                    //fprintf(stderr, "ctrl+c received\n");
                     return { KEY_QUIT, -1 };
                 }
             }
@@ -211,11 +189,11 @@ static void clear_color() {
     std::cout << "\033[0m";
 }
 
-static std::vector<LV2Host::InfoPair> filter_matches(
-    const std::vector<LV2Host::InfoPair>& all, const std::string& search) {
+static std::vector<InfoPair> filter_matches(
+    const std::vector<InfoPair>& all, const std::string& search) {
 
     if (search.empty()) return all;
-    std::vector<LV2Host::InfoPair> result;
+    std::vector<InfoPair> result;
     std::string needle = search;
     std::transform(needle.begin(), needle.end(), needle.begin(), ::tolower);
     for (auto& m : all) {
@@ -228,7 +206,7 @@ static std::vector<LV2Host::InfoPair> filter_matches(
 }
 
 // returns selected index, or -1 if none selected
-int pager_print(const std::vector<LV2Host::InfoPair>& matches, bool allow_default) {
+int pager_print(const std::vector<InfoPair>& matches, bool allow_default) {
 
     if (matches.empty()) return -1;
 
@@ -423,7 +401,7 @@ int main(int argc, char *argv[]) {
     std::vector<std::string> logo = {
         " ╦  ╦ ╦ ╔╦╗ ╔═╗ ",
         " ║  ║ ║ ║║║ ╠═╣ ",
-        " ╩═╝╚═╝═╩╝╚═╝ ╩ "
+        " ╚═╝╚═╝ ╝ ╚ ╝ ╚ "
     };
     int tw = get_terminal_width();
     blue();
@@ -510,15 +488,20 @@ while (run) {
     }
     clear_previous_output();
     std::cout << std::flush;
-    if (!preset_uri.empty()) host->apply_preset(preset_uri, preset_label);
+    if (!preset_uri.empty()) host->applyPreset(preset_uri, preset_label);
     if (!host->initUi()) return 1;
 
-    host->startUi();
+    host->setRun();
     uri = "";
+    if (host->is_nogui()) {
+        while (host->getRun())
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+
     //host.run_ui_loop();
 }
-    //mh.shutdown_all();
+    mh.shutdown_all();
     if (signal_fd != -1) close(signal_fd);
-
+    std::cout << "Exit" << std::endl;
     return 0;
 }

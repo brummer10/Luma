@@ -28,21 +28,33 @@ public:
 
     void attach_bridge(IHostUiBridge* b) override;
     const char* lv2_ui_uri() const override;
-    bool create_window(int w, int h) override;
+    bool create_ui(int w, int h) override;
     void close_window() override;
     void embed_native(void* widget) override;
     void resize(int w, int h) override;
     void finalize_window(const char* title) override;
     void poll_events() override;
+    void set_preset_name(const std::string pname) override;
     void set_close_callback(std::function<void()> cb) override;
     void* native_window() override { return window_; }
 
 private:
+    static void on_preset_changed(GtkComboBox*, gpointer);
+    static void on_save_clicked(GtkButton*, gpointer);
     static gboolean on_delete(GtkWidget*, GdkEvent*, gpointer);
     static void on_destroy(GtkWidget*, gpointer data);
+    void refreshPresets();
     GtkWidget* window_ = nullptr;
     GtkWidget* container_ = nullptr;
     GtkWidget* child_ = nullptr;
+    GtkWidget* header_box_ = nullptr;
+    GtkWidget* preset_combo_ = nullptr;
+    GtkWidget* save_button_ = nullptr;
+
+    std::vector<InfoPair> preset_list_;
+    std::string presetName;
+
+
     IHostUiBridge* bridge = nullptr;
 
     std::function<void()> close_cb_;

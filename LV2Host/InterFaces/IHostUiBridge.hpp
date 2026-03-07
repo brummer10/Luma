@@ -12,6 +12,8 @@
 #include <vector>
 #include <string>
 
+#include "LV2HostTypes.hpp"
+
 class IHostUiBridge {
 public:
     virtual ~IHostUiBridge() = default;
@@ -51,4 +53,18 @@ public:
     virtual bool port_is_input(uint32_t port) const = 0;
 
     virtual bool port_is_control(uint32_t port) const = 0;
+
+    virtual void set_resource(void* res) = 0;
+
+    virtual void* get_resource() const = 0;
+    
+    virtual const std::vector<InfoPair> get_presets() = 0;
+
+    virtual void applyPreset(const std::string& uri, const std::string& label) = 0;
+
+    virtual void restoreDefaults() = 0;
+
+    virtual const std::string& getPluginName() const = 0;
+    
+    virtual bool savePresetBundle(const std::string& preset_name)  = 0;
 };

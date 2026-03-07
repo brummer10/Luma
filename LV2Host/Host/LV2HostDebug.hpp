@@ -135,7 +135,9 @@
     }
 
     //event wrapper
-    void dump_atom_event(const LV2_Atom_Event* ev, const char* dir) {
+    void dump_atom_event(const LV2_Atom_Event* ev, const char* dir, bool color = false) {
+        if (color) fprintf(stderr, "\033[1;34m");
         fprintf(stderr, "\n## %s (%u bytes) ##\n", dir, ev->body.size);
         dump_atom(&ev->body);
+        if (color) fprintf(stderr, "\033[0m");
     }

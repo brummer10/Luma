@@ -16,12 +16,13 @@ public:
 
     const char* lv2_ui_uri() const override { return nullptr; }
 
-    bool create_window(int w, int h) override;
+    bool create_ui(int w, int h) override;
     void close_window() override;
     void embed_native(void*) override {}
     void resize(int, int) override {}
     void finalize_window(const char* title) override;
     void poll_events() override;
+    void set_preset_name(const std::string pname) override;
     void set_close_callback(std::function<void()> cb) override {
         close_cb = std::move(cb);
     }

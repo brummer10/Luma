@@ -18,7 +18,7 @@ void StubGuiBackend::attach_bridge(IHostUiBridge* b) {
     bridge = b;
 }
 
-bool StubGuiBackend::create_window(int w, int h) {
+bool StubGuiBackend::create_ui(int w, int h) {
     width = w;
     height = h;
 
@@ -52,6 +52,15 @@ bool StubGuiBackend::create_window(int w, int h) {
     return true;
 }
 
+void StubGuiBackend::set_preset_name(const std::string pname) {
+    XLockDisplay(display);
+    std::string name = bridge->getPluginName();
+    name += " - " + pname;
+    finalize_window(name.c_str());
+    XFlush(display);
+    XUnlockDisplay(display);
+}
+
 void StubGuiBackend::close_window() {
     if (display) {
         if (window)
@@ -65,6 +74,10 @@ void StubGuiBackend::close_window() {
 void StubGuiBackend::finalize_window(const char* title) {
     if (display && window)
         XStoreName(display, window, title ? title : "Stub GUI");
+
+    XChangeProperty(display, window, XInternAtom(display, "_NET_WM_NAME", False),
+                    XInternAtom(display, "UTF8_STRING", False), 8,
+                    PropModeReplace, (unsigned char*)title, std::strlen(title));
 }
 
 void StubGuiBackend::rebuild_layout() {

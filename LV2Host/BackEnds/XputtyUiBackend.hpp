@@ -1,6 +1,6 @@
 
 /*
- * X11UiBackend.hpp
+ * XputtyUiBackend.hpp
  *
  * SPDX-License-Identifier:  BSD-3-Clause
  *
@@ -12,48 +12,48 @@
 #include "IUiBackend.hpp"
 #include "IHostUiBridge.hpp"
 
-#include <X11/Xlib.h>
-#include <X11/Xatom.h>
-#include <X11/Xutil.h>
+#include "xwidgets.h"
+#include "SaveBox.h"
 #include <cstring>
 #include <functional>
 
 /****************************************************************
-    X11UiBackend.hpp - this is the X11 UI backend for Luma LV2 host
+    XputtyUiBackend.hpp - this is the Xputty UI backend for Luma LV2 host
 
 ****************************************************************/
 
-class X11UiBackend : public IUiBackend {
+class XputtyUiBackend : public IUiBackend {
 public:
-    X11UiBackend();
-    ~X11UiBackend() override;
+    XputtyUiBackend();
+    ~XputtyUiBackend() override;
+    SaveBox sb;
 
     void attach_bridge(IHostUiBridge* b) override;
-
-    // LV2 UI type we support
     const char* lv2_ui_uri() const override;
-
-    // window lifecycle
-    bool create_window(int w, int h) override;
+    bool create_ui(int w, int h) override;
     void close_window() override;
     void embed_native(void* child) override;
     void resize(int w, int h) override;
     void finalize_window(const char* title) override;
     void set_close_callback(std::function<void()> cb) override;
-
-    // event loop
     void poll_events() override;
-
-    // native handles
-    void* native_window() override {return (void*)window_; }
+    void set_preset_name(const std::string pname) override;
+    void* native_window() override {return (void*)container_->widget; }
 
 private:
     static void set_xdnd_proxy(Display* dpy, Window plugin_window);
+    void refreshPresets();
     std::function<void()> close_cb_;
     Atom wm_delete_ = None;
     Atom wm_protocols = None;
-    Display* display_ = nullptr;
-    Window window_ = 0;
+    Xputty* app = nullptr;
+    Widget_t* window_ = nullptr;
+    Widget_t* container_ = nullptr;
+    Widget_t* header_ = nullptr;
+    Widget_t* presets_ = nullptr;
+    Widget_t* save_presets_ = nullptr;
+    std::string presetName = "";
+    std::vector<InfoPair> preset_list_;
     Window plugin_window = 0;
     IHostUiBridge* bridge = nullptr;
     int idle_counter = 0;

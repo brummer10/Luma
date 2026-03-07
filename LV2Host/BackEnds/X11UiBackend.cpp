@@ -19,8 +19,10 @@ X11UiBackend::X11UiBackend() {}
 
 X11UiBackend::~X11UiBackend() {
     if (display_) {
-        if (window_)
+        if (window_) {
+            XUnmapWindow(display_, window_);
             XDestroyWindow(display_, window_);
+        }
         XCloseDisplay(display_);
     }
 }
@@ -33,7 +35,7 @@ const char* X11UiBackend::lv2_ui_uri() const {
     return LV2_UI__X11UI;
 }
 
-bool X11UiBackend::create_window(int w, int h) {
+bool X11UiBackend::create_ui(int w, int h) {
     width_ = w;
     height_ = h;
 
@@ -68,8 +70,10 @@ bool X11UiBackend::create_window(int w, int h) {
 
 void X11UiBackend::close_window() {
     if (display_) {
-        if (window_)
+        if (window_) {
+            XUnmapWindow(display_, window_);
             XDestroyWindow(display_, window_);
+        }
         XCloseDisplay(display_);
     }
     window_ = 0;
@@ -106,6 +110,14 @@ void X11UiBackend::resize(int w, int h) {
     XUnlockDisplay(display_);
 }
 
+void X11UiBackend::set_preset_name(const std::string pname) {
+    XLockDisplay(display_);
+    std::string name = bridge->getPluginName() + " - " + pname;
+    finalize_window(name.c_str());
+    XFlush(display_);
+    XUnlockDisplay(display_);
+}
+
 void X11UiBackend::finalize_window(const char* title) {
     if (!display_ || !window_)
         return;
@@ -136,12 +148,13 @@ void X11UiBackend::poll_events() {
         case ClientMessage:
             if ((Atom)ev.xclient.message_type == wm_protocols &&
                     (Atom)ev.xclient.data.l[0] == wm_delete_) {
-                if (close_cb_)
-                    close_cb_();
+                if (window_ == ev.xclient.window)
+                    if (close_cb_) close_cb_();
             }
             break;
 
         case ConfigureNotify:
+            if (window_ != ev.xany.window) break;
             if (width_  != ev.xconfigure.width || height_ != ev.xconfigure.height) {
                 width_  = ev.xconfigure.width;
                 height_ = ev.xconfigure.height;
