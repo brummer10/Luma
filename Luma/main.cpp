@@ -25,6 +25,7 @@
 #include "xwidgets.h"
 #include "TextEntry.h"
 #include "Systray.h"
+#include "CmdParser.h"
 #include <memory>
 #include <vector>
 #include <string>
@@ -54,6 +55,24 @@ evfunc lrelease;
 
 char **list = nullptr;
 int list_size = 0;
+
+// catch signals and exit clean
+void signal_handler (int sig) {
+    switch (sig) {
+        case SIGINT:
+        case SIGHUP:
+        case SIGTERM:
+        case SIGQUIT:
+            XLockDisplay(win->app->dpy);
+            mh.shutdown_all();
+            quit(win);
+            XFlush(win->app->dpy);
+            XUnlockDisplay(win->app->dpy);
+        break;
+        default:
+        break;
+    }
+}
 
 // convert plugin list to char** list for display
 void fill_plugin_list() {
@@ -101,17 +120,11 @@ static void search_callback(void* w_, void*) {
     filter_plugins(txt);
 }
 
-// load a plugin
-static bool loadPlugin() {
-    int index = (int)adj_get_value(plugin_view->adj);
-    if (index < 0 || index >= (int)filtered_plugins.size()) {
-        fprintf(stderr, "Failed to init plugin %i\n", index);
-        return false;
-    }
+static bool loadPluginByUri(std::string uri, Xputty *app) {
     cur_host = nullptr;
     cur_host = mh.create_instance();
     cur_host->set_engine(std::make_unique<JackEngine>());
-    cur_host->set_resource(win->app);
+    cur_host->set_resource(app);
     #ifndef NOGUI
     cur_host->register_ui_backend(std::make_shared<XputtyUiBackend>());
     cur_host->register_ui_backend(std::make_shared<StubGuiBackend>());
@@ -119,7 +132,6 @@ static bool loadPlugin() {
     cur_host->register_ui_backend(std::make_shared<Gtk2UiBackend>());
     #endif
     #endif
-    std::string uri = filtered_plugins[index].uri;
     if (!cur_host->init(uri.c_str())) {
         fprintf(stderr, "Failed to init plugin\n");
         return false;
@@ -127,6 +139,17 @@ static bool loadPlugin() {
     cur_host->initUi();
     cur_host->setRun();
     return true;
+}
+
+// load a plugin
+static bool loadPlugin() {
+    int index = (int)adj_get_value(plugin_view->adj);
+    if (index < 0 || index >= (int)filtered_plugins.size()) {
+        fprintf(stderr, "Failed to init plugin %i\n", index);
+        return false;
+    }
+    std::string uri = filtered_plugins[index].uri;
+    return loadPluginByUri(uri, win->app);
 }
 
 // load plugin button callback
@@ -189,56 +212,88 @@ void key_press(void *, void *key_, void *user_data) {
     search_entry->func.key_press_callback(search_entry, key_, user_data);
 }
 
-int main(int , char** )
+int main(int argc, char** argv)
 {
     if (0 == XInitThreads())
         std::cerr << "Warning: XInitThreads() failed\n";
-    
+ 
+    signal (SIGQUIT, signal_handler);
+    signal (SIGTERM, signal_handler);
+    signal (SIGHUP, signal_handler);
+    signal (SIGINT, signal_handler);
+   
+    CmdParser cmd;
+    std::string uri;
+    std::string preset;
+
+    if (!cmd.parseCmdLine(argc, argv)) {
+        cmd.printUsage(argv[0]);
+        return 1;
+    }
+    // cmd options
+    uri = cmd.opts.uri.value_or("");
+    preset = cmd.opts.preset.value_or("");
+
     Xputty app;
     main_init(&app);
-    TextEntry tx;
 
-    win = create_window(&app, DefaultRootWindow(app.dpy), 100, 100, 390, 500);
-    widget_set_icon_from_png(win, LDVAR(LV2Host_png));
-    set_widget_color(win, (Color_state)0, (Color_mod)1, 0.145f, 0.153f, 0.169f, 1.0f);
-    set_widget_color(win, (Color_state)2, (Color_mod)1, 0.117f, 0.121f, 0.133f, 1.0f);
-    win->func.expose_callback = draw_window;
-    win->func.key_press_callback = key_press;
-    widget_set_title(win, "Luma LV2 Host");
+    if (uri.empty()) {
+        TextEntry tx;
 
-    search_entry = tx.addTextEntry(win, "", 20, 20, 350, 30);
-    search_entry->func.value_changed_callback = search_callback;
+        win = create_window(&app, DefaultRootWindow(app.dpy), 100, 100, 390, 500);
+        widget_set_icon_from_png(win, LDVAR(LV2Host_png));
+        set_widget_color(win, (Color_state)0, (Color_mod)1, 0.145f, 0.153f, 0.169f, 1.0f);
+        set_widget_color(win, (Color_state)2, (Color_mod)1, 0.117f, 0.121f, 0.133f, 1.0f);
+        win->func.expose_callback = draw_window;
+        win->func.key_press_callback = key_press;
+        widget_set_title(win, "Luma LV2 Host");
 
-    plugin_view = add_listview(win,"", 20, 70, 350, 350);
-    set_widget_color(plugin_view->childlist->childs[0],
-        (Color_state)0, (Color_mod)2, 0.102f, 0.106f, 0.118f, 1.0f);
-    set_widget_color(plugin_view->childlist->childs[0],
-        (Color_state)0, (Color_mod)3, 0.902f, 0.902f, 0.902f, 1.0f);
-    set_widget_color(plugin_view->childlist->childs[0],
-        (Color_state)0, (Color_mod)5, 0.188f, 0.196f, 0.220f, 1.0f);
-    listview_set_scale_factor(plugin_view, 0.24);
-    lrelease = plugin_view->func.button_release_callback;
-    plugin_view->func.button_release_callback = check_presets;
-    //plugin_view->func.value_changed_callback = check_presets;
-    
-    preset_menu = create_menu(plugin_view,25);
-    preset_menu->func.button_release_callback = load_preset;
+        search_entry = tx.addTextEntry(win, "", 20, 20, 350, 30);
+        search_entry->func.value_changed_callback = search_callback;
 
-    Widget_t* load_btn = add_button(win,"Load Plugin", 20, 440, 120, 40);
-    load_btn->func.expose_callback = draw_button;
-    load_btn->func.value_changed_callback = load_plugin;
+        plugin_view = add_listview(win,"", 20, 70, 350, 350);
+        set_widget_color(plugin_view->childlist->childs[0],
+            (Color_state)0, (Color_mod)2, 0.102f, 0.106f, 0.118f, 1.0f);
+        set_widget_color(plugin_view->childlist->childs[0],
+            (Color_state)0, (Color_mod)3, 0.902f, 0.902f, 0.902f, 1.0f);
+        set_widget_color(plugin_view->childlist->childs[0],
+            (Color_state)0, (Color_mod)5, 0.188f, 0.196f, 0.220f, 1.0f);
+        listview_set_scale_factor(plugin_view, 0.24);
+        lrelease = plugin_view->func.button_release_callback;
+        plugin_view->func.button_release_callback = check_presets;
+        //plugin_view->func.value_changed_callback = check_presets;
+        
+        preset_menu = create_menu(plugin_view,25);
+        preset_menu->func.button_release_callback = load_preset;
 
-    Widget_t* quit_btn = add_button(win, "Quit",250, 440, 120, 40);
-    quit_btn->func.expose_callback = draw_button;
-    quit_btn->func.value_changed_callback = quit_app;
+        Widget_t* load_btn = add_button(win,"Load Plugin", 20, 440, 120, 40);
+        load_btn->func.expose_callback = draw_button;
+        load_btn->func.value_changed_callback = load_plugin;
 
-    all_plugins = temp.find_plugin_matches("");
-    filtered_plugins = all_plugins;
-    fill_plugin_list();
+        Widget_t* quit_btn = add_button(win, "Quit",250, 440, 120, 40);
+        quit_btn->func.expose_callback = draw_button;
+        quit_btn->func.value_changed_callback = quit_app;
 
-    create_systray_widget(win, 0, 0, 240, 240);
+        all_plugins = temp.find_plugin_matches("");
+        filtered_plugins = all_plugins;
+        fill_plugin_list();
 
-    widget_show_all(win);
+        create_systray_widget(win, 0, 0, 240, 240);
+
+        widget_show_all(win);
+    } else {
+        if (loadPluginByUri(uri, &app)) {
+            if (!preset.empty()) {
+                current_presets = temp.get_presets(uri.c_str());
+                for (auto& p : current_presets) {
+                    if ((p.uri.compare(preset) == 0) || (p.label.compare(preset) == 0)) {
+                        cur_host->applyPreset(p.uri, p.label);
+                        break;
+                    }
+                }
+            }
+        }
+    }
     main_run(&app);
     for (int i = 0; i < list_size; ++i) {
         delete[] list[i];

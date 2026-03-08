@@ -4,7 +4,7 @@ HEADER_DIR := $(LIB_DIR)include/
 RESOURCES  := $(wildcard $(RESOURCES_DIR)*.png)
 
 CXX      := g++
-TARGET   := luma
+TARGET   := ../luma
 INCL     := -I. -I../LV2Host/BackEnds -I../LV2Host/Engines -I../LV2Host/InterFaces \
             -I../LV2Host/Host -I../LV2Host -I$(HEADER_DIR)
 
@@ -42,7 +42,7 @@ DEP      := $(OBJ:.o=.d)
 PKG_CFLAGS := $(shell pkg-config --cflags $(PKGS))
 PKG_LIBS   := $(shell pkg-config --libs   $(PKGS))
 
-CXXFLAGS += -std=c++17 -Wall -Wextra -O0 -g $(EXTRA_DEFS)
+CXXFLAGS += -std=c++17 -Wall -Wextra -O2 $(EXTRA_DEFS)
 LDFLAGS  := -ldl -lm
 
 all: $(TARGET)
