@@ -1,5 +1,9 @@
 # Luma
 
+<p align="center">
+    <img src="https://github.com/brummer10/Luma/blob/main/luma.png?raw=true" />
+</p>
+
 ### The tiny LV2 host you read to understand LV2.
 
 **Luma** is a lightweight, multi-instance LV2 host for Linux focused on **clarity, correctness, and debugging**.
@@ -8,42 +12,11 @@ It is capable of running real-world LV2 plugins while remaining small enough to 
 
 ---
 
-# Luma in 30 seconds
-
-**What it is**
-
-A small and clean LV2 host capable of running real plugins with UI support and modern LV2 extensions.
-
-**What makes it different**
-
-Most LV2 hosts are embedded inside large DAWs or modular environments.  
-Luma keeps the **core hosting logic simple and visible**, making it easy to understand how LV2 hosting actually works.
-
-**What it supports**
-
-- LV2 plugins with **X11 / GTK2  UIs**
-- **Preset load and save**
-- **LV2 state store and restore**
-- **Shared worker thread**
-- **Shared UI thread**
-- **Terminal NO-GUI mode**
-- **Debug build with DummyEngine**
-
-**Typical uses**
-
-- learning how LV2 hosting works
-- debugging LV2 plugins
-- testing LV2 extensions
-- running plugins headless
-- building experimental hosts
-
----
-
 # Highlights
 
-- lightweight LV2 host
-- readable reference implementation
-- libxputty LV2 UI frontend
+- Multi-instance LV2 plugin loading
+- readable  LV2 host reference implementation
+- LV2 UI frontend support
 - shared UI + worker threads
 - preset + state support
 - headless terminal mode
@@ -164,45 +137,14 @@ This makes Luma useful as:
 
 ---
 
-# Feature Matrix
-
-| Feature | Supported |
-|--------|-----------|
-| Multi-instance hosting | ✅ |
-| JACK backend | ✅ |
-| libxputty UI frontend | ✅ |
-| X11 LV2 UI | ✅ |
-| GTK2 LV2 UI | ✅ |
-| NO-GUI terminal mode | ✅ |
-| Shared UI thread | ✅ |
-| Shared worker thread | ✅ |
-| LV2 State | ✅ |
-| LV2 State save | ✅ |
-| LV2 State restore | ✅ |
-| LV2 Preset discovery | ✅ |
-| LV2 Preset load | ✅ |
-| LV2 Preset save | ✅ |
-| LV2 Worker | ✅ |
-| LV2 Atom | ✅ |
-| LV2 data-access | ✅ |
-| URID mapping | ✅ |
-| Resize handling | ✅ |
-| Debug Atom logging | ✅ |
-| Dummy audio engine | ✅ |
-| Plugin graph / routing | ❌ |
-| Session management | ❌ |
-| Qt UI backend | ❌ |
-
----
-
 # Requirements
 
 - Linux
 - JACK
 - X11
-- GTK2 (for GTK-based UIs)
+- GTK2 (optional for GTK-based UIs)
 - Lilv
-- libxputty
+- libxputty (included)
 - C++17 compatible compiler
 
 Example installation (Debian / Ubuntu):
@@ -258,77 +200,9 @@ Run Luma:
 
 or launch a plugin directly:
 
-    ./luma <plugin-name-or-uri>
+    ./luma -u <plugin-uri> -p <preset-uri-or-name>
 
 If no plugin is specified, the **interactive browser** opens.
-
----
-
-## Browser Controls
-
-    ENTER   → next page
-    ↑ / ↓   → page navigation
-    number  → select plugin
-    q       → quit
-
----
-
-## Preset Selection
-
-If presets are available:
-
-    [0] OrangeCrunch
-    [1] PreEQ
-
-    Select preset (ENTER = default):
-
-- number → load preset  
-- ENTER → default state  
-
----
-
-# Architecture Overview
-
-Luma uses a modular architecture with shared infrastructure.
-
-## Host Instance
-
-Each plugin instance consists of:
-
-    LV2Host
-     ├── Engine (JACK or DummyEngine)
-     ├── UI Backend
-     ├── Atom Buffers
-     └── State / Preset handling
-
----
-
-## Global Threads
-
-All plugin instances share common infrastructure:
-
-    MultiHost
-     ├── shared UI thread
-     ├── shared worker thread
-     └── multiple LV2Host instances
-
-This keeps the system lightweight while supporting multiple plugins simultaneously.
-
----
-
-# Design Philosophy
-
-Luma intentionally avoids becoming a DAW.
-
-Instead it focuses on:
-
-- correctness over feature bloat  
-- minimal and readable code  
-- real-world LV2 compliance  
-- debugging visibility  
-- predictable behavior  
-
-It is designed as a **compact and understandable LV2 reference host**.
 
 ---
 
