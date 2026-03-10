@@ -63,6 +63,7 @@ struct Port {
 
     std::string uri;
     const char* symbol = nullptr;
+    const char* name = nullptr;
 };
 
 /****************************************************************
@@ -148,7 +149,10 @@ public:
             }
 
             if (p.is_control && p.is_input) {
-                LilvNode *pdflt, *pmin, *pmax;
+                LilvNode *pdflt, *pmin, *pmax, *nm;
+                nm = lilv_port_get_name(plugin, lp);
+                p.name = lilv_node_as_string(nm);
+                lilv_node_free(nm);
                 lilv_port_get_range(plugin, lp, &pdflt, &pmin, &pmax);
                 if (pmin) {
                     p.fmin = lilv_node_as_float(pmin);

@@ -20,22 +20,24 @@
 #include <iostream>
 #include <cstring>
 #include <cstdlib>
+#include <vector>
 
 struct CmdParser {
 
     struct CmdOptions {
         std::optional<std::string> uri;
         std::optional<std::string> preset;
-    } opts;
+    };
 
+    std::vector<CmdOptions> opt;
 
     void printUsage(const char* progName) {
         std::cout
             << "\nUsage: " << progName << " [options]\n"
             << "    Options:\n"
-            << "      -h, --help             print this help and exit\n"
-            << "      -u, --uri <name>       plugin uri to load\n"
+            << "      -u, --uri <name>       plugin uri or name to load\n"
             << "      -p, --preset <name>    preset uri or Label to load\n\n"
+            << "      -h, --help             print this help and exit\n"
             << "      default: (no option)   show plugin list\n\n";
     }
 
@@ -52,6 +54,9 @@ struct CmdParser {
     }
 
     bool parseCmdLine(int argc, char** argv) {
+        int countPlugins = 0;
+        int count = 0;
+        opt.reserve(4);
         for (int i = 1; i < argc; ++i) {
             const char* arg = argv[i];
 
@@ -60,16 +65,22 @@ struct CmdParser {
                     std::cerr << "Error: --uri requires a string\n";
                     return false;
                 }
-                opts.uri = argv[++i];
+                opt.push_back({argv[++i], ""});
+                ++countPlugins;
             } else if (std::strcmp(arg, "-p") == 0 || std::strcmp(arg, "--preset") == 0) {
                 if (i + 1 >= argc) {
                     std::cerr << "Error: --preset requires a string\n";
                     return false;
                 }
-                opts.preset = argv[++i];
+                if (countPlugins < count) {
+                    std::cerr << "Error: --preset requires a --uri before\n";
+                    return false;
+                }
+                opt[countPlugins-1].preset = argv[++i];
             } else if (std::strcmp(arg, "-h") == 0 || std::strcmp(arg, "--help") == 0) {
                 return false;
             }
+            ++count;
         }
         return true;
     }

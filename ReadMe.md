@@ -200,9 +200,9 @@ Run Luma:
 
 or launch a plugin directly:
 
-    ./luma -u <plugin-uri> -p <preset-uri-or-name>
+    ./luma -u <plugin-uri-or-name> -p <preset-uri-or-name>
 
-If no plugin is specified, the **interactive browser** opens.
+If no plugin is specified or found, the **interactive browser** opens.
 
 ---
 

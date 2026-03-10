@@ -86,12 +86,13 @@ static void draw_button(void *w_, void* ) {
     cairo_set_line_width(w->crb,  2);
     roundrec(w->crb,3.0, 4.0, width-6, height-8, 8.0);
     cairo_set_source_rgba(w->crb, 0.12, 0.135, 0.135, 1.0);
+    if(w->state==1) cairo_set_source_rgba(w->crb, 0.124, 0.139, 0.139, 1.0);
     cairo_fill (w->crb);
     cairo_new_path (w->crb);       
 
     
     setButtonFrame(w, PRELIGHT_, height);
-    if(w->state==1) use_base_color_scheme(w, INSENSITIVE_);
+    if(w->state==1) setButtonFrame(w, PRELIGHT_, height+5, -2);
     cairo_set_line_width(w->crb,  2);
     roundrec(w->crb,1.0, 1.0, width-1, height-1, 8.0);
     cairo_stroke(w->crb);

@@ -29,7 +29,10 @@ public:
     LV2Host* create_instance() {
         auto host = std::make_unique<LV2Host>();
         auto ptr = host.get();
-        hosts.push_back(std::move(host));
+        // add host to pending vector
+        pending.push_back(std::move(host));
+        pending_ready.store(true, std::memory_order_release);
+
         bool expected = false;
         if (ui_is_running.compare_exchange_strong(expected, true)) {
             run.store(true);
@@ -40,6 +43,14 @@ public:
 
     void run_ui() {
         while (run.load()) {
+            // move new plugs to hosts vector, if needed
+            if (pending_ready.exchange(false, std::memory_order_acquire)) {
+                for (auto& h : pending)
+                    hosts.push_back(std::move(h));
+
+                pending.clear();
+            }
+
             for (auto it = hosts.begin(); it != hosts.end();) {
                 auto& h = *it;
                 h->runUi();
@@ -76,6 +87,8 @@ public:
 
 private:
     std::vector<std::unique_ptr<LV2Host>> hosts;
+    std::vector<std::unique_ptr<LV2Host>> pending;
+    std::atomic<bool> pending_ready{false};
     std::thread ui_thread;
     std::atomic<bool> ui_is_running{false};
     std::atomic<bool> run{false};
