@@ -38,6 +38,7 @@ endif
 
 clean:
 	@rm -f ./libxputty/xputty/resources/LV2Host.png
+	@rm -f ./libxputty/xputty/resources/menu.png
 
 
 features:

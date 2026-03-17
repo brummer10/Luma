@@ -19,7 +19,15 @@
         - LV2PluginRegistry
         - host front-end
 ****************************************************************/
+
+#define LV2_UI__INTERNAL "http://lv2plug.in/ns/extensions/ui#internalUi"
+
 struct InfoPair {
     std::string uri;
+    std::string label;
+};
+
+struct EnumPair {
+    float val;
     std::string label;
 };

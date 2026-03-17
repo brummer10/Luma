@@ -28,6 +28,7 @@
 #include <lv2/resize-port/resize-port.h>
 #include <lv2/instance-access/instance-access.h>
 #include <lv2/data-access/data-access.h>
+#include <lv2/port-props/port-props.h>
 
 #include <dlfcn.h>
 #include <unistd.h>
@@ -99,6 +100,10 @@ public:
         if (b) available_backends.push_back(b);
     }
 
+    void replaceNoGuiBackend(std::shared_ptr<IUiBackend> b) {
+        if (b) available_backends[0] = b;
+    }
+
     bool is_nogui() {
         return !backend || backend->lv2_ui_uri() == nullptr ? true : false;
     }
@@ -110,6 +115,7 @@ public:
         if (set) {
             init_state(world, plugin, instance, um, unm, &ports, plugin_name,
                 &ui_needs_control_update, &ui_needs_initial_update);
+            load_defaults();
             store_default(feat_);
         } else {
             closeHost();
@@ -231,8 +237,11 @@ public:
                     if (lv2_ringbuffer_read_space(rb) < total) break;
                     std::vector<uint8_t> buf(total);
                     lv2_ringbuffer_read(rb, (char*)buf.data(), total);
-                    ui_desc->port_event(ui_handle, p.index, total,
+                    handle_atom((LV2_Atom*)buf.data());
+                    if (ui_desc) {
+                        ui_desc->port_event(ui_handle, p.index, total,
                                 urids.atom_eventTransfer, buf.data());
+                    }
                 }
             }
             // run plugin UI idle loop
@@ -279,6 +288,42 @@ public:
                     p.control);
             }
         }
+    }
+
+    const std::vector<Port>& get_ports() const override {
+        return ports;
+    }
+
+    const std::vector<PortGroup>& get_groups()  const override {
+        return groups;
+    }
+
+    const std::vector<EnumPair>& get_enum_pair(uint32_t index) const override {
+        return ports[index].enumdict;
+    }
+
+    void patch_set(const std::string& uri, float value) override {
+        patch_set_value(uri, value);
+    }
+
+    void patch_set(const std::string& uri, int value) override {
+        patch_set_value(uri, value);
+    }
+
+    void patch_set(const std::string& uri, bool value) override {
+        patch_set_value(uri, value);
+    }
+
+    void patch_set(const std::string& uri, const char* value) override {
+        patch_set_value(uri, value);
+    }
+
+    void patch_set(const std::string& uri, std::string value) override {
+        patch_set_value(uri, value);
+    }
+
+    void patch_get(const std::string& uri) override {
+        send_patch_get(uri);
     }
 
     uint32_t meter_count() const override {
@@ -652,6 +697,7 @@ private:
         atom_class      = lilv_new_uri(world, LV2_ATOM__AtomPort);
         input_class     = lilv_new_uri(world, LV2_CORE__InputPort);
         x11_class       = lilv_new_uri(world, LV2_UI__X11UI);
+        internal_class  = lilv_new_uri(world, LV2_UI__INTERNAL);
         rsz_minimumSize = lilv_new_uri (world, LV2_RESIZE_PORT__minimumSize);
         init_urids();
         init_features();
@@ -671,6 +717,7 @@ private:
         lilv_node_free (atom_class);
         lilv_node_free (input_class);
         lilv_node_free (x11_class);
+        lilv_node_free (internal_class);
         lilv_node_free (rsz_minimumSize);
     }
 
@@ -701,7 +748,7 @@ private:
         hports.init(world, plugin, engine.get(), required_atom_size, audio_class,
                     control_class, atom_class, input_class, urids);
 
-        return hports.init_ports(ports);
+        return hports.init_ports(ports, groups);
     }
 
 /****************************************************************
@@ -862,6 +909,120 @@ private:
     }
 
 /****************************************************************
+                INTERNAL UI - Atom parameter Helper functions 
+
+****************************************************************/
+
+    template<typename T>
+    void patch_set_value(const std::string& uri, const T& value) {
+        int patch_atom_in = -1;
+        for (size_t i = 0; i < ports.size(); ++i) {
+            if (ports[i].is_atom && ports[i].is_input) {
+                patch_atom_in = i;
+                break;
+            }
+        }
+        if (patch_atom_in < 0) return;
+        Port& atom = ports[patch_atom_in];
+        AtomState* st = atom.atom_state;
+        if (!st) return;
+
+        uint8_t obj_buf[512];
+        LV2_Atom_Forge forge;
+        lv2_atom_forge_init(&forge, &um);
+        lv2_atom_forge_set_buffer(&forge, obj_buf, sizeof(obj_buf));
+        LV2_Atom_Forge_Frame frame;
+        LV2_Atom* msg = (LV2_Atom*)lv2_atom_forge_object(&forge, &frame, 0, urids.patch_Set);
+        lv2_atom_forge_key(&forge, urids.patch_property);
+        lv2_atom_forge_urid(&forge, um.map(um.handle, uri.c_str()));
+        lv2_atom_forge_key(&forge, urids.patch_value);
+
+        if constexpr (std::is_same_v<T, float>) {
+            lv2_atom_forge_float(&forge, value);
+        } else if constexpr (std::is_same_v<T, int>) {
+            lv2_atom_forge_int(&forge, value);
+        } else if constexpr (std::is_same_v<T, bool>) {
+            lv2_atom_forge_bool(&forge, value);
+        } else if constexpr (std::is_same_v<T, std::string>) {
+            lv2_atom_forge_path(&forge, value.c_str(), value.size());
+        } else if constexpr (std::is_same_v<T, const char*>) {
+            lv2_atom_forge_path(&forge, value, strlen(value));
+        }
+
+        lv2_atom_forge_pop(&forge, &frame);
+
+        size_t size = lv2_atom_total_size(msg);
+        st->ui_to_dsp.resize(size);
+        memcpy(st->ui_to_dsp.data(), msg, size);
+
+        st->ui_to_dsp_type = urids.atom_eventTransfer;
+        st->ui_to_dsp_pending.store(true);
+    }
+
+    void send_patch_get(const std::string& uri) {
+        int patch_atom_in = -1;
+        for (size_t i = 0; i < ports.size(); ++i) {
+            if (ports[i].is_atom && ports[i].is_input) {
+                patch_atom_in = i;
+                break;
+            }
+        }
+        if (patch_atom_in < 0) return;
+        Port& atom = ports[patch_atom_in];
+        AtomState* st = atom.atom_state;
+        if (!st) return;
+
+        uint8_t obj_buf[128];
+        LV2_Atom_Forge forge;
+        lv2_atom_forge_init(&forge, &um);
+        lv2_atom_forge_set_buffer(&forge, obj_buf, sizeof(obj_buf));
+        LV2_Atom_Forge_Frame frame;
+        LV2_Atom* msg = (LV2_Atom*)lv2_atom_forge_object(&forge, &frame, 0, urids.patch_Get);
+
+        if (!uri.empty()) {
+            lv2_atom_forge_key(&forge, urids.patch_property);
+            lv2_atom_forge_urid(&forge, um.map(um.handle, uri.c_str()));
+        }
+        lv2_atom_forge_pop(&forge, &frame);
+
+        size_t size = lv2_atom_total_size(msg);
+        st->ui_to_dsp.resize(size);
+        memcpy(st->ui_to_dsp.data(), msg, size);
+        st->ui_to_dsp_type = urids.atom_eventTransfer;
+        st->ui_to_dsp_pending.store(true);
+    }
+
+    void handle_atom(const LV2_Atom* atom) {
+        if (!backend) return;
+        if (atom->type != urids.atom_Object) return;
+        const LV2_Atom_Object* obj = (const LV2_Atom_Object*)atom;
+        if (obj->body.otype != urids.patch_Set) return;
+        const LV2_Atom* property = nullptr;
+        const LV2_Atom* value = nullptr;
+        lv2_atom_object_get(obj, urids.patch_property, &property,
+                                    urids.patch_value, &value, 0);
+
+        if (!property || !value) return;
+        if (property->type != urids.atom_URID) return;
+        LV2_URID prop = ((LV2_Atom_URID*)property)->body;
+        const char* uri = unmap_uri(this, prop);
+
+        if (value->type == urids.atom_Float) {
+            float v = ((LV2_Atom_Float*)value)->body;
+            backend->patch_set(uri, v);
+        } else if (value->type == urids.atom_Int) {
+            int v = ((LV2_Atom_Int*)value)->body;
+            backend->patch_set(uri, v);
+        } else if (value->type == urids.atom_Bool) {
+            bool v = ((LV2_Atom_Bool*)value)->body;
+            backend->patch_set(uri, v);
+        } else if (value->type == urids.atom_Path) {
+            const char* path = (const char*)(value + 1);
+            backend->patch_set(uri, path);
+        }
+    }
+
+/****************************************************************
                 UI - Helper functions 
 
 ****************************************************************/
@@ -875,7 +1036,7 @@ private:
         if (p.is_control && size == sizeof(float)) {
             p.control = *(const float*)buf;
             #if defined(DEBUG)
-            fprintf(stderr, "ui_write %s -> %f\n", p.symbol ? p.symbol : "?", p.control);
+            fprintf(stderr, "ui_write %i %s -> %f\n", p.index, p.symbol ? p.symbol : "?", p.control);
             #endif
             return;
         }
@@ -928,11 +1089,15 @@ private:
     }
 
     void send_control_outputs() {
-        if (!ui_handle) return;
+        //if (!ui_handle) return;
         for (auto& p : ports)
             if (p.is_control && !p.is_input) {
-                ui_desc->port_event(
-                    ui_handle, p.index, sizeof(float), 0, &p.control);
+                if (ui_handle) {
+                    ui_desc->port_event(
+                        ui_handle, p.index, sizeof(float), 0, &p.control);
+                }/* else if (backend) {
+                    backend->control_set(p.index, p.control);
+                }*/
             }
     }
 
@@ -1166,13 +1331,14 @@ private:
     LilvState* default_state = nullptr;
 
     LilvNode *audio_class, *control_class, *atom_class,
-             *input_class, *x11_class,*rsz_minimumSize;
+             *input_class, *x11_class, *internal_class, *rsz_minimumSize;
 
     std::unique_ptr<IDspEngine> engine;
     std::vector<std::shared_ptr<IUiBackend>> available_backends;
     std::shared_ptr<IUiBackend> backend = nullptr; 
 
     std::vector<Port> ports;
+    std::vector<PortGroup> groups;
 
     LV2UI_Resize resize;
     void* ui_dl = nullptr;

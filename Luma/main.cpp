@@ -17,6 +17,7 @@
 #ifndef NOGUI
 #include "XputtyUiBackend.cpp"
 #include "StubGuiBackend.cpp"
+#include "InternalUiBackend.cpp"
 #if defined(HAVE_GTK2)
 #include "GTK2UiBackend.cpp"
 #endif
@@ -134,8 +135,9 @@ static bool loadPluginByUri(std::string uri, Xputty *app) {
     cur_host->set_engine(std::make_unique<JackEngine>());
     cur_host->set_resource(app);
     #ifndef NOGUI
+    cur_host->replaceNoGuiBackend(std::make_shared<InternalUiBackend>());
     cur_host->register_ui_backend(std::make_shared<XputtyUiBackend>());
-    cur_host->register_ui_backend(std::make_shared<StubGuiBackend>());
+    //cur_host->register_ui_backend(std::make_shared<StubGuiBackend>());
     #if defined(HAVE_GTK2)
     cur_host->register_ui_backend(std::make_shared<Gtk2UiBackend>());
     #endif

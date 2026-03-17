@@ -29,6 +29,12 @@ public:
 
     void* native_window() override { return (void*)window; }
 
+    void patch_set(const std::string, float) override {}
+    void patch_set(const std::string, int) override {}
+    void patch_set(const std::string, bool) override {}
+    void patch_set(const std::string, const char*) override {}
+    void control_set(uint32_t, float) override {}
+
 private:
     struct Slider {
         uint32_t control_index;

@@ -57,6 +57,12 @@ public:
         handle_command(line);
     }
 
+    void patch_set(const std::string, float) override {}
+    void patch_set(const std::string, int) override {}
+    void patch_set(const std::string, bool) override {}
+    void patch_set(const std::string, const char*) override {}
+    void control_set(uint32_t, float) override {}
+
 private:
     IHostUiBridge* bridge = nullptr;
     std::function<void()> close_cb;

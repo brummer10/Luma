@@ -85,8 +85,8 @@ static void draw_button(void *w_, void* ) {
 
     cairo_set_line_width(w->crb,  2);
     roundrec(w->crb,3.0, 4.0, width-6, height-8, 8.0);
-    cairo_set_source_rgba(w->crb, 0.12, 0.135, 0.135, 1.0);
-    if(w->state==1) cairo_set_source_rgba(w->crb, 0.124, 0.139, 0.139, 1.0);
+    cairo_set_source_rgba(w->crb, 0.145f, 0.153f, 0.169f, 1.0);
+    if(w->state==1) cairo_set_source_rgba(w->crb, 0.155f, 0.163f, 0.179f, 1.0);
     cairo_fill (w->crb);
     cairo_new_path (w->crb);       
 

@@ -35,6 +35,12 @@ public:
     virtual void set_close_callback(std::function<void()> cb) = 0;
     virtual void set_preset_name(const std::string pname) = 0;
 
+    virtual void patch_set(const std::string property, float v) = 0;
+    virtual void patch_set(const std::string property, int v) = 0;
+    virtual void patch_set(const std::string property, bool v) = 0;
+    virtual void patch_set(const std::string property, const char* path) = 0;
+    virtual void control_set(uint32_t port, float value) = 0;
+
     virtual void* native_window() = 0;
 };
 

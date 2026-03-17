@@ -38,6 +38,12 @@ public:
     void set_close_callback(std::function<void()> cb) override;
     void* native_window() override { return window_; }
 
+    void patch_set(const std::string, float) override {}
+    void patch_set(const std::string, int) override {}
+    void patch_set(const std::string, bool) override {}
+    void patch_set(const std::string, const char*) override {}
+    void control_set(uint32_t, float) override {}
+
 private:
     static void on_preset_changed(GtkComboBox*, gpointer);
     static void on_save_clicked(GtkButton*, gpointer);

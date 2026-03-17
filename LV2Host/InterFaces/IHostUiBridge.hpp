@@ -13,6 +13,7 @@
 #include <string>
 
 #include "LV2HostTypes.hpp"
+#include "LV2HostPorts.hpp"
 
 class IHostUiBridge {
 public:
@@ -23,6 +24,19 @@ public:
     virtual uint32_t control_port_count() const = 0;
 
     virtual void list_controls() const = 0;
+
+    virtual const std::vector<Port>& get_ports() const = 0;
+    virtual const std::vector<PortGroup>& get_groups() const = 0;
+
+    virtual void patch_set(const std::string& uri, float value) = 0;
+    virtual void patch_set(const std::string& uri, int value) = 0;
+    virtual void patch_set(const std::string& uri, bool value) = 0;
+    virtual void patch_set(const std::string& uri, const char* value) = 0;
+    virtual void patch_set(const std::string& uri, std::string value) = 0;
+
+    virtual void patch_get(const std::string& uri) = 0;
+
+    virtual const std::vector<EnumPair>& get_enum_pair(uint32_t index) const = 0;
 
     virtual float get_control(uint32_t port) const = 0;
 

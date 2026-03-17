@@ -48,6 +48,12 @@ public:
     // native handles
     void* native_window() override {return (void*)window_; }
 
+    void patch_set(const std::string, float) override {}
+    void patch_set(const std::string, int) override {}
+    void patch_set(const std::string, bool) override {}
+    void patch_set(const std::string, const char*) override {}
+    void control_set(uint32_t, float) override {}
+
 private:
     static void set_xdnd_proxy(Display* dpy, Window plugin_window);
     std::function<void()> close_cb_;
