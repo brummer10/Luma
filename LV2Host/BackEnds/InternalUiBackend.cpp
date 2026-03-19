@@ -46,212 +46,247 @@ void InternalUiBackend::refreshPresets() {
     combobox_set_active_entry(presets_, set);    
 }
 
-void InternalUiBackend::calcSize(int &w, int &h) {
-    const std::vector<Port>& ports = bridge->get_ports();
+inline int portWidth(const Port& p) {
+    if (p.dt == tp_enum)
+        return 200;
+    return 100;
+}
+
+bool isUsableGroup(const PortGroup& g) {
+    if (!g.ports.size())
+        return false;
+    return true;
+}
+
+void calcGroupSize(const std::vector<Port>& ports, const PortGroup& g,
+                                        int maxWidth, int& w, int& h) {
     int x = 20;
     int x1 = 20;
     int y = 20;
-    for (const auto& p : ports) {
+    for (auto pi : g.ports) {
+        const Port& p = ports[pi];
         if ((p.is_control || p.is_patch) && p.is_input) {
-            if (p.dt == tp_scale || p.dt == tp_int ||p.dt == tp_toggle ||
-                                 p.dt == tp_trigger || p.dt == tp_atom ) {
-                if ((x + 100) > w) {
-                    y += 90;
-                    x1 = x > x1 ? x : x1;
-                    x = 20;
-                }
-                x += 100;
-            } else if (p.dt == tp_enum) {
-                if ((x + 220) > w) {
-                    y += 90;
-                    x1 = x > x1 ? x : x1;
-                    x = 20;
-                }
-                x += 200;
+            int pw = portWidth(p);
+            if ((x + pw) > maxWidth) {
+                y += 90;
+                x1 = std::max<int>(x1, x);
+                x = 20;
             }
+            x += pw;
         }
     }
-    x1 = x > x1 ? x : x1;
-    w = std::max<int>(360,x1+20);
-    h = std::max<int>(240,y+130);
+    x1 = std::max<int>(x1, x);
+    w = std::max<int>(200, x1 + 20);
+    h = std::max<int>(100, y + 90);
+}
+
+void InternalUiBackend::calcSize(int &w, int &h) {
+    const auto& ports  = bridge->get_ports();
+    const auto& groups = bridge->get_groups();
+
+    int y = 20;
+    int max_w = 360;
+    //group_sizes.push_back(0);
+    for (const auto& g : groups) {
+        if (!isUsableGroup(g)) continue;
+        int gw = 0;
+        int gh = 0;
+        calcGroupSize(ports, g, w, gw, gh);
+        group_sizes.push_back(gh);
+        y += gh ;
+        max_w = std::max<int>(max_w, gw);
+    }
+    w = max_w + 20;
+    h = std::max<int>(140, y + 20);
 }
 
 void InternalUiBackend::createController() {
     int x = 20;
     int y = 20;
+    int i = 0;
+    int gh = 0;
     const std::vector<Port>& ports = bridge->get_ports();
-    //const std::vector<PortGroup>& groups = bridge->get_groups();
-    for (const auto& p : ports) {
-        if (p.df == dtp_no_gui) continue;
-        if (p.is_control && p.is_input) {
-            if (p.dt == tp_scale || p.dt == tp_int) {
-                if (x + 100 > container_->width) {
-                    y += 90;
-                    x = 20;
-                }
-                float step = 1.0;
-                if (p.dt == tp_scale) step = pow(10.0, round(log10((p.fmax - p.fmin) / 300.0)));
-                Widget_t* ctr = add_knob(container_, p.name, x, y, 100, 80);
-                contr.push_back(ctr);
-                ctr->data = p.index;
-                ctr->parent_struct = this;
-                set_adjustment(ctr->adj, p.defvalue, p.control, p.fmin, p.fmax, step, CL_CONTINUOS);
-                ctr->func.value_changed_callback = [] (void *w_, void* ) {
-                    Widget_t *w = (Widget_t*)w_;
-                    InternalUiBackend* self = static_cast<InternalUiBackend*>(w->parent_struct);
-                    self->bridge->set_control(w->data, adj_get_value(w->adj));
-                };
-                x += 100;
-            } else if (p.dt == tp_toggle) {
-                if (x + 100 > container_->width) {
-                    y += 90;
-                    x = 20;
-                }
-                Widget_t* ctr = add_toggle_button(container_, p.name, x+5, y+20, 90, 40);
-                contr.push_back(ctr);
-                ctr->data = p.index;
-                ctr->parent_struct = this;
-                adj_set_value(ctr->adj, p.defvalue);
-                ctr->func.value_changed_callback = [] (void *w_, void* ) {
-                    Widget_t *w = (Widget_t*)w_;
-                    InternalUiBackend* self = static_cast<InternalUiBackend*>(w->parent_struct);
-                    self->bridge->set_control(w->data, adj_get_value(w->adj));
-                };
-                x += 100;
-            } else if (p.dt == tp_trigger) {
-                if (x + 100 > container_->width) {
-                    y += 90;
-                    x = 20;
-                }
-                Widget_t* ctr = add_button(container_, p.name, x+5, y+20, 90, 40);
-                contr.push_back(ctr);
-                ctr->data = p.index;
-                ctr->parent_struct = this;
-                adj_set_value(ctr->adj, p.defvalue);
-                ctr->func.value_changed_callback = [] (void *w_, void* ) {
-                    Widget_t *w = (Widget_t*)w_;
-                    InternalUiBackend* self = static_cast<InternalUiBackend*>(w->parent_struct);
-                    self->bridge->set_control(w->data, adj_get_value(w->adj));
-                };
-                x += 100;
-            } else if (p.dt == tp_enum) {
-                if (x + 220 > container_->width) {
-                    y += 90;
-                    x = 20;
-                }
-                add_label(container_, p.name, x, y, 200, 20);
-                Widget_t* ctr = add_combobox(container_, p.name, x, y+20, 200, 40);
-                contr.push_back(ctr);
-                ctr->data = p.index;
-                ctr->parent_struct = this;
-                int i = 0;
-                int set = 0;
-                for (auto& e : p.enumdict) {
-                    i++;
-                    combobox_add_entry(ctr, e.label.c_str());
-                    if (i == p.defvalue) {
-                        set = i;
+    const std::vector<PortGroup>& groups = bridge->get_groups();
+    for (auto& g : groups) {
+        if (!isUsableGroup(g)) continue;
+        Widget_t* frame = add_frame(container_, g.name.c_str(), 0, gh, container_->width, group_sizes[i]);
+        gh += group_sizes[i];
+        i += 1;
+        x = 20;
+        y = 20;
+        for (auto pi : g.ports) {
+            const Port& p = ports[pi];
+            if (p.df == dtp_no_gui) continue;
+            if (p.is_control && p.is_input) {
+                if (p.dt == tp_scale || p.dt == tp_int) {
+                    if (x + 100 > frame->width) {
+                        y += 90;
+                        x = 20;
                     }
-                }
-                combobox_set_active_entry(ctr, set);    
-                adj_set_value(ctr->adj, p.defvalue);
-                ctr->func.value_changed_callback = [] (void *w_, void* ) {
-                    Widget_t *w = (Widget_t*)w_;
-                    InternalUiBackend* self = static_cast<InternalUiBackend*>(w->parent_struct);
-                    const std::vector<EnumPair>& e = self->bridge->get_enum_pair(w->data);
-                    self->bridge->set_control(w->data, e[(int)adj_get_value(w->adj)].val);
-                };
-                x += 200;
-            }
-        } else if (p.is_patch && p.is_input) {
-            if (p.dt == tp_scale || p.dt == tp_int) {
-                if (x + 100 > container_->width) {
-                    y += 90;
-                    x = 20;
-                }
-                float step = 1.0;
-                if (p.dt == tp_scale) step = pow(10.0, round(log10((p.fmax - p.fmin) / 300.0)));
-                Widget_t* ctr = add_knob(container_, p.name, x, y, 100, 80);
-                patch_contr.push_back(ctr);
-                ctr->data = p.dt;
-                ctr->parent_struct = this;
-                ctr->user_data = (void*) &p.uri;
-                set_adjustment(ctr->adj, p.defvalue, p.defvalue, p.fmin, p.fmax, step, CL_CONTINUOS);
-                ctr->func.value_changed_callback = [] (void *w_, void* ) {
-                    Widget_t *w = (Widget_t*)w_;
-                    InternalUiBackend* self = static_cast<InternalUiBackend*>(w->parent_struct);
-                    const std::string& uri = *(std::string*)w->user_data;
-                    float value = adj_get_value(w->adj);
-                    if (w->data == tp_int) {
-                        self->bridge->patch_set(uri, (int)value);
-                    } else {
-                        self->bridge->patch_set(uri, value);
+                    float step = 1.0;
+                    if (p.dt == tp_scale) step = pow(10.0, round(log10((p.fmax - p.fmin) / 300.0)));
+                    Widget_t* ctr = add_knob(frame, p.name, x, y, 100, 80);
+                    contr.push_back(ctr);
+                    ctr->data = p.index;
+                    ctr->parent_struct = this;
+                    set_adjustment(ctr->adj, p.defvalue, p.control, p.fmin, p.fmax, step, CL_CONTINUOS);
+                    ctr->func.value_changed_callback = [] (void *w_, void* ) {
+                        Widget_t *w = (Widget_t*)w_;
+                        InternalUiBackend* self = static_cast<InternalUiBackend*>(w->parent_struct);
+                        self->bridge->set_control(w->data, adj_get_value(w->adj));
+                    };
+                    x += 100;
+                } else if (p.dt == tp_toggle) {
+                    if (x + 100 > frame->width) {
+                        y += 90;
+                        x = 20;
                     }
-                };
-                x += 100;
-            } else if (p.dt == tp_toggle) {
-                if (x + 100 > container_->width) {
-                    y += 90;
-                    x = 20;
-                }
-                Widget_t* ctr = add_toggle_button(container_, p.name, x+5, y+20, 90, 40);
-                patch_contr.push_back(ctr);
-                ctr->data = -1;
-                ctr->parent_struct = this;
-                ctr->user_data = (void*) &p.uri;
-                adj_set_value(ctr->adj, p.defvalue);
-                ctr->func.value_changed_callback = [] (void *w_, void* ) {
-                    Widget_t *w = (Widget_t*)w_;
-                    InternalUiBackend* self = static_cast<InternalUiBackend*>(w->parent_struct);
-                    const std::string& uri = *(std::string*)w->user_data;
-                    float value = adj_get_value(w->adj);
-                    self->bridge->patch_set(uri, (bool)value);
-                };
-                x += 100;
-            } else if (p.dt == tp_atom) {
-                if (x + 100 > container_->width) {
-                    y += 90;
-                    x = 20;
-                }
-                add_label(container_, p.name, x, y, 100, 20);
-                Widget_t* ctr = add_lv2_file_button(container_, p.name, x+10, y+20, 80, 40);
-                ctr->data = -1;
-                ctr->parent_struct = this;
-                ctr->user_data = (void*) &p.uri;
-                Widget_t* ctrl = add_label(container_, "", x, y+60, 100, 20);
-                patch_contr.push_back(ctrl);
-                ctrl->data = -1;
-                ctrl->parent_struct = this;
-                ctrl->user_data = (void*) &p.uri;
-                ctr->func.user_callback = [] (void *w_, void* user_data) {
-                    Widget_t *w = (Widget_t*)w_;
-                    InternalUiBackend* self = static_cast<InternalUiBackend*>(w->parent_struct);
-                    const std::string& uri = *(std::string*)w->user_data;
-                    if(user_data !=NULL) {
-                        const char* path = *(const char**)user_data;
-                        self->bridge->patch_set(uri, path);
-                        //self->bridge->patch_get("");
+                    Widget_t* ctr = add_toggle_button(frame, p.name, x+5, y+20, 90, 40);
+                    contr.push_back(ctr);
+                    ctr->data = p.index;
+                    ctr->parent_struct = this;
+                    adj_set_value(ctr->adj, p.defvalue);
+                    ctr->func.value_changed_callback = [] (void *w_, void* ) {
+                        Widget_t *w = (Widget_t*)w_;
+                        InternalUiBackend* self = static_cast<InternalUiBackend*>(w->parent_struct);
+                        self->bridge->set_control(w->data, adj_get_value(w->adj));
+                    };
+                    x += 100;
+                } else if (p.dt == tp_trigger) {
+                    if (x + 100 > frame->width) {
+                        y += 90;
+                        x = 20;
                     }
-                };
-                x += 100;
-            }
-        } /* else if (p.is_control && !p.is_input) {
-            if (p.dt == tp_scale || p.dt == tp_int) {
-                if (x + 100 > container_->width) {
-                    y += 90;
-                    x = 20;
+                    Widget_t* ctr = add_button(frame, p.name, x+5, y+20, 90, 40);
+                    contr.push_back(ctr);
+                    ctr->data = p.index;
+                    ctr->parent_struct = this;
+                    adj_set_value(ctr->adj, p.defvalue);
+                    ctr->func.value_changed_callback = [] (void *w_, void* ) {
+                        Widget_t *w = (Widget_t*)w_;
+                        InternalUiBackend* self = static_cast<InternalUiBackend*>(w->parent_struct);
+                        self->bridge->set_control(w->data, adj_get_value(w->adj));
+                    };
+                    x += 100;
+                } else if (p.dt == tp_enum) {
+                    if (x + 220 > frame->width) {
+                        y += 90;
+                        x = 20;
+                    }
+                    add_label(frame, p.name, x, y, 200, 20);
+                    Widget_t* ctr = add_combobox(frame, p.name, x, y+20, 200, 40);
+                    contr.push_back(ctr);
+                    ctr->data = p.index;
+                    ctr->parent_struct = this;
+                    int i = 0;
+                    int set = 0;
+                    for (auto& e : p.enumdict) {
+                        i++;
+                        combobox_add_entry(ctr, e.label.c_str());
+                        if (i == p.defvalue) {
+                            set = i;
+                        }
+                    }
+                    combobox_set_active_entry(ctr, set);    
+                    adj_set_value(ctr->adj, p.defvalue);
+                    ctr->func.value_changed_callback = [] (void *w_, void* ) {
+                        Widget_t *w = (Widget_t*)w_;
+                        InternalUiBackend* self = static_cast<InternalUiBackend*>(w->parent_struct);
+                        const std::vector<EnumPair>& e = self->bridge->get_enum_pair(w->data);
+                        self->bridge->set_control(w->data, e[(int)adj_get_value(w->adj)].val);
+                    };
+                    x += 200;
                 }
-                float step = 1.0;
-                if (p.dt == tp_scale) step = pow(10.0, round(log10((p.fmax - p.fmin) / 300.0)));
-                add_label(container_, p.name, x, y, 100, 20);
-                Widget_t* ctr = add_vmeter(container_, p.name, false, x+40, y+20, 20, 70);
-                contr.push_back(ctr);
-                ctr->data = p.index;
-                ctr->parent_struct = this;
-                set_adjustment(ctr->adj, p.defvalue, p.control, p.fmin, p.fmax, step, CL_METER);
-                x += 100;
-            }
-        }*/
+            } else if (p.is_patch && p.is_input) {
+                if (p.dt == tp_scale || p.dt == tp_int) {
+                    if (x + 100 > frame->width) {
+                        y += 90;
+                        x = 20;
+                    }
+                    float step = 1.0;
+                    if (p.dt == tp_scale) step = pow(10.0, round(log10((p.fmax - p.fmin) / 300.0)));
+                    Widget_t* ctr = add_knob(frame, p.name, x, y, 100, 80);
+                    patch_contr.push_back(ctr);
+                    ctr->data = p.dt;
+                    ctr->parent_struct = this;
+                    ctr->user_data = (void*) &p.uri;
+                    set_adjustment(ctr->adj, p.defvalue, p.defvalue, p.fmin, p.fmax, step, CL_CONTINUOS);
+                    ctr->func.value_changed_callback = [] (void *w_, void* ) {
+                        Widget_t *w = (Widget_t*)w_;
+                        InternalUiBackend* self = static_cast<InternalUiBackend*>(w->parent_struct);
+                        const std::string& uri = *(std::string*)w->user_data;
+                        float value = adj_get_value(w->adj);
+                        if (w->data == tp_int) {
+                            self->bridge->patch_set(uri, (int)value);
+                        } else {
+                            self->bridge->patch_set(uri, value);
+                        }
+                    };
+                    x += 100;
+                } else if (p.dt == tp_toggle) {
+                    if (x + 100 > frame->width) {
+                        y += 90;
+                        x = 20;
+                    }
+                    Widget_t* ctr = add_toggle_button(frame, p.name, x+5, y+20, 90, 40);
+                    patch_contr.push_back(ctr);
+                    ctr->data = -1;
+                    ctr->parent_struct = this;
+                    ctr->user_data = (void*) &p.uri;
+                    adj_set_value(ctr->adj, p.defvalue);
+                    ctr->func.value_changed_callback = [] (void *w_, void* ) {
+                        Widget_t *w = (Widget_t*)w_;
+                        InternalUiBackend* self = static_cast<InternalUiBackend*>(w->parent_struct);
+                        const std::string& uri = *(std::string*)w->user_data;
+                        float value = adj_get_value(w->adj);
+                        self->bridge->patch_set(uri, (bool)value);
+                    };
+                    x += 100;
+                } else if (p.dt == tp_atom) {
+                    if (x + 100 > frame->width) {
+                        y += 90;
+                        x = 20;
+                    }
+                    add_label(frame, p.name, x, y, 100, 20);
+                    Widget_t* ctr = add_lv2_file_button(frame, p.name, x+10, y+20, 80, 40);
+                    ctr->data = -1;
+                    ctr->parent_struct = this;
+                    ctr->user_data = (void*) &p.uri;
+                    Widget_t* ctrl = add_label(frame, "", x, y+60, 100, 20);
+                    patch_contr.push_back(ctrl);
+                    ctrl->data = -1;
+                    ctrl->parent_struct = this;
+                    ctrl->user_data = (void*) &p.uri;
+                    ctr->func.user_callback = [] (void *w_, void* user_data) {
+                        Widget_t *w = (Widget_t*)w_;
+                        InternalUiBackend* self = static_cast<InternalUiBackend*>(w->parent_struct);
+                        const std::string& uri = *(std::string*)w->user_data;
+                        if(user_data !=NULL) {
+                            const char* path = *(const char**)user_data;
+                            self->bridge->patch_set(uri, path);
+                            //self->bridge->patch_get("");
+                        }
+                    };
+                    x += 100;
+                }
+            } /* else if (p.is_control && !p.is_input) {
+                if (p.dt == tp_scale || p.dt == tp_int) {
+                    if (x + 100 > frame->width) {
+                        y += 90;
+                        x = 20;
+                    }
+                    float step = 1.0;
+                    if (p.dt == tp_scale) step = pow(10.0, round(log10((p.fmax - p.fmin) / 300.0)));
+                    add_label(frame, p.name, x, y, 100, 20);
+                    Widget_t* ctr = add_vmeter(frame, p.name, false, x+40, y+20, 20, 70);
+                    contr.push_back(ctr);
+                    ctr->data = p.index;
+                    ctr->parent_struct = this;
+                    set_adjustment(ctr->adj, p.defvalue, p.control, p.fmin, p.fmax, step, CL_METER);
+                    x += 100;
+                }
+            }*/
+        }
     }
 }
 

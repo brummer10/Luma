@@ -68,6 +68,7 @@ private:
     std::vector<Widget_t*> patch_contr;
     std::string presetName = "";
     std::vector<InfoPair> preset_list_;
+    std::vector<int> group_sizes;
     Window plugin_window = 0;
     IHostUiBridge* bridge = nullptr;
     int idle_counter = 0;

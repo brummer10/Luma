@@ -125,6 +125,8 @@ public:
 
         LilvNode* midi_event = lilv_new_uri(world, LV2_MIDI__MidiEvent);
         LilvNode* notOnGui = lilv_new_uri(world, LV2_PORT_PROPS__notOnGUI);
+        const LilvNode* nd = lilv_plugin_get_name(plugin);
+        std::string name = lilv_node_as_string(nd);
 
         for (uint32_t i = 0; i < n; ++i) {
             const LilvPort* lp = lilv_plugin_get_port_by_index(plugin, i);
@@ -333,13 +335,14 @@ public:
         lilv_node_free(notOnGui);
 
         // port groups unused for now
-/*
+
         LilvNode* pg_group = lilv_new_uri(world, "http://lv2plug.in/ns/ext/port-groups#group");
         LilvNode* pg_name  = lilv_new_uri(world, "http://lv2plug.in/ns/ext/port-groups#name");
         LilvNode* pg_role  = lilv_new_uri(world, "http://lv2plug.in/ns/ext/port-groups#role");
+        LilvNode* rdfs_label = lilv_new_uri(world, LILV_NS_RDFS "label");
         PortGroup g;
-        g.uri = "urn:default";;
-        g.name = "Default";
+        g.uri = "urn:default:none";;
+        g.name = name;
         groups.push_back(std::move(g));
         for (uint32_t i = 0; i < ports.size(); ++i) {
             const LilvPort* lp = nullptr;
@@ -348,7 +351,7 @@ public:
                 LilvNode* prop = lilv_new_uri(world, ports[i].uri.c_str());
                 group = lilv_world_get(world, prop, pg_group, NULL);
                 lilv_node_free(prop);
-            } else {
+            } else if (ports[i].is_control) {
                 lp = lilv_plugin_get_port_by_index(plugin, ports[i].index);
                 group = lilv_port_get(plugin, lp, pg_group);
             }
@@ -363,6 +366,7 @@ public:
                     PortGroup g;
                     g.uri = guri;
                     const LilvNode* name = lilv_world_get(world, group, pg_name, NULL);
+                    if (!name) name = lilv_world_get(world, group, rdfs_label, NULL);
                     if (name) g.name = lilv_node_as_string(name);
                     groups.push_back(std::move(g));
                 } else {
@@ -374,7 +378,7 @@ public:
                // const LilvNode* role = lilv_port_get(plugin, lp, pg_role);
                // if (role)
                //     ports[i].role = lilv_node_as_uri(role);
-            } else {
+            } else if ((ports[i].is_patch || ports[i].is_control) && ports[i].is_input) {
                 ports[i].group_uri = "urn:default";
                 ports[i].group_index = 0;
                 groups[0].ports.push_back(i);
@@ -383,12 +387,13 @@ public:
         lilv_node_free(pg_group);
         lilv_node_free(pg_name);
         lilv_node_free(pg_role);
+        lilv_node_free(rdfs_label);
 
         std::sort(groups.begin(), groups.end(),
             [](const PortGroup& a, const PortGroup& b) {
-                return a.name < b.name;
+                return a.uri < b.uri;
             });
-*/
+
         return true;
     }
 
