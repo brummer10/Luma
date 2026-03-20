@@ -126,6 +126,8 @@ void InternalUiBackend::createController() {
                     float step = 1.0;
                     if (p.dt == tp_scale) step = pow(10.0, round(log10((p.fmax - p.fmin) / 300.0)));
                     Widget_t* ctr = add_knob(frame, p.name, x, y, 100, 80);
+                    utf8crop_middle(ctr->input_label, p.name, 15);
+                    ctr->label = ctr->input_label;
                     contr.push_back(ctr);
                     ctr->data = p.index;
                     ctr->parent_struct = this;
@@ -142,6 +144,8 @@ void InternalUiBackend::createController() {
                         x = 20;
                     }
                     Widget_t* ctr = add_toggle_button(frame, p.name, x+5, y+20, 90, 40);
+                    utf8crop_middle(ctr->input_label, p.name, 15);
+                    ctr->label = ctr->input_label;
                     contr.push_back(ctr);
                     ctr->data = p.index;
                     ctr->parent_struct = this;
@@ -158,6 +162,8 @@ void InternalUiBackend::createController() {
                         x = 20;
                     }
                     Widget_t* ctr = add_button(frame, p.name, x+5, y+20, 90, 40);
+                    utf8crop_middle(ctr->input_label, p.name, 15);
+                    ctr->label = ctr->input_label;
                     contr.push_back(ctr);
                     ctr->data = p.index;
                     ctr->parent_struct = this;
@@ -206,6 +212,8 @@ void InternalUiBackend::createController() {
                     float step = 1.0;
                     if (p.dt == tp_scale) step = pow(10.0, round(log10((p.fmax - p.fmin) / 300.0)));
                     Widget_t* ctr = add_knob(frame, p.name, x, y, 100, 80);
+                    utf8crop_middle(ctr->input_label, p.name, 15);
+                    ctr->label = ctr->input_label;
                     patch_contr.push_back(ctr);
                     ctr->data = p.dt;
                     ctr->parent_struct = this;
@@ -229,6 +237,8 @@ void InternalUiBackend::createController() {
                         x = 20;
                     }
                     Widget_t* ctr = add_toggle_button(frame, p.name, x+5, y+20, 90, 40);
+                    utf8crop_middle(ctr->input_label, p.name, 15);
+                    ctr->label = ctr->input_label;
                     patch_contr.push_back(ctr);
                     ctr->data = -1;
                     ctr->parent_struct = this;
@@ -249,6 +259,8 @@ void InternalUiBackend::createController() {
                     }
                     add_label(frame, p.name, x, y, 100, 20);
                     Widget_t* ctr = add_lv2_file_button(frame, p.name, x+10, y+20, 80, 40);
+                    utf8crop_middle(ctr->input_label, p.name, 15);
+                    ctr->label = ctr->input_label;
                     ctr->data = -1;
                     ctr->parent_struct = this;
                     ctr->user_data = (void*) &p.uri;

@@ -35,6 +35,7 @@
 #include <algorithm>
 #include <atomic>
 #include <thread>
+#include <chrono>
 
 #include "Draw.cc"
 
@@ -296,6 +297,7 @@ void createWindow(Xputty *app) {
 
 int main(int argc, char** argv)
 {
+    auto t1 = std::chrono::high_resolution_clock::now();
     if (0 == XInitThreads())
         std::cerr << "Warning: XInitThreads() failed\n";
  
@@ -336,6 +338,9 @@ int main(int argc, char** argv)
         }
         if (!ready) createWindow(&app);
     }
+    auto t2 = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration<double>( t2 - t1 ).count();
+    std::cout << duration << " sec for " << all_plugins.size() << " Plugins" << std::endl;
     main_run(&app);
     for (int i = 0; i < list_size; ++i) {
         delete[] list[i];
